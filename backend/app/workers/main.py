@@ -14,6 +14,7 @@ from typing import Optional
 from app.database.session import get_session_factory
 from app.workers.claim import claim_next_job, mark_job_done, mark_job_failed, get_worker_id
 from app.workers.dispatch import dispatch_job
+from app.workers.exceptions import UnsupportedJobError
 from app.workers.reaper import reap_stuck_jobs
 from app.workers.scheduler import run_scheduler
 from app.core.logging import get_logger
@@ -123,6 +124,30 @@ def worker_loop(once: bool = False) -> None:
                             "job_id": job.id,
                             "job_type": job.job_type,
                             "counts": counts,
+                        },
+                    )
+
+                except UnsupportedJobError as e:
+                    # Permanent failure: unsupported job type (train, unknown, etc.)
+                    session.rollback()
+
+                    error_msg = f"{e.reason}: {e.detail}"
+
+                    with factory() as retry_session:
+                        # Re-fetch the job in a new session
+                        retry_job = retry_session.get(type(job), job.id)
+                        if retry_job:
+                            # Mark as permanent failure without retry
+                            mark_job_failed(retry_session, retry_job, error_msg, None)
+                            retry_session.commit()
+
+                    _log.warning(
+                        "job permanently failed (unsupported)",
+                        extra={
+                            "job_id": job.id,
+                            "job_type": job.job_type,
+                            "reason": e.reason,
+                            "error": error_msg[:200],
                         },
                     )
 

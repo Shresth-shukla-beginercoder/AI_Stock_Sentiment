@@ -1,0 +1,228 @@
+# AI Stock Sentiment Agent — production compose
+#
+# Production-optimized configuration:
+# - No dev-only ports exposed (postgres 5437 removed)
+# - Resource limits per service
+# - Health checks preserved
+# - Graceful shutdown signals
+# - Secrets from environment only (no defaults in compose)
+# - Production network isolation
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Required environment variables (set before running):
+#   POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+#   API_ADMIN_KEY (for admin access)
+#   DATA_MODE (production: "live")
+#   MARKET_DATA_PROVIDER, TWELVE_DATA_API_KEY
+#   EXA_API_KEY, TAVILY_API_KEY, APIFY_API_TOKEN (for collectors)
+#   CORS_ORIGINS (production host origins)
+#   DOCKERHUB_USERNAME (for image names; default: local)
+
+name: ai-stock-sentiment-prod
+
+networks:
+  stock_network:
+    name: stock_network
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: postgres_data
+  hf_models:
+    name: hf_models
+
+services:
+  # PostgreSQL database — production-grade configuration
+  postgres:
+    image: postgres:17-alpine
+    container_name: ai_stock_postgres_prod
+    networks:
+      - stock_network
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Production optimizations
+      POSTGRES_INITDB_ARGS: "-c shared_buffers=256MB -c effective_cache_size=1GB -c maintenance_work_mem=64MB -c checkpoint_completion_target=0.9 -c wal_buffers=16MB -c default_statistics_target=100 -c random_page_cost=1.1 -c effective_io_concurrency=200"
+    # No ports exposed in production (use bastion/VPN for admin access)
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Resource limits (tune based on workload)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -q"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Backend API server
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: ${DOCKERHUB_USERNAME:-local}/ai-stock-backend:1.0.0
+    container_name: ai_stock_backend_prod
+    networks:
+      - stock_network
+    environment:
+      # Database (production host, no localhost)
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Data mode: live (not demo)
+      DATA_MODE: ${DATA_MODE:-live}
+      # Admin authentication
+      API_ADMIN_KEY: ${API_ADMIN_KEY}
+      # Data collection API keys
+      EXA_API_KEY: ${EXA_API_KEY}
+      TAVILY_API_KEY: ${TAVILY_API_KEY}
+      APIFY_API_TOKEN: ${APIFY_API_TOKEN}
+      APIFY_API_KEY: ${APIFY_API_KEY:-}
+      # Market data provider
+      MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER}
+      TWELVE_DATA_API_KEY: ${TWELVE_DATA_API_KEY}
+      # Model caching
+      HF_HOME: /models
+      # CORS configuration (production origins)
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      # Server binding (0.0.0.0 for reverse proxy)
+      HOST: "0.0.0.0"
+      PORT: "8000"
+    # Production: expose only to reverse proxy (no host ports)
+    # Use reverse proxy (nginx, load balancer) to terminate TLS and route traffic
+    expose:
+      - "8000"
+    volumes:
+      - hf_models:/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # Frontend static content + reverse proxy
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: ${DOCKERHUB_USERNAME:-local}/ai-stock-frontend:1.0.0
+    container_name: ai_stock_frontend_prod
+    networks:
+      - stock_network
+    depends_on:
+      backend:
+        condition: service_healthy
+    # Production: expose only HTTP (use external TLS terminator)
+    # Example: nginx reverse proxy on host, port 443 with TLS
+    expose:
+      - "80"
+    # Resource limits (static serve only)
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  # Background job worker(s) — one or more instances for processing
+  # For multiple workers: docker compose -f docker-compose.prod.yml up -d --scale worker=3
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: ${DOCKERHUB_USERNAME:-local}/ai-stock-worker:1.0.0
+    container_name: ai_stock_worker_prod
+    networks:
+      - stock_network
+    environment:
+      # Database
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Data mode
+      DATA_MODE: ${DATA_MODE:-live}
+      # Data collection API keys
+      EXA_API_KEY: ${EXA_API_KEY}
+      TAVILY_API_KEY: ${TAVILY_API_KEY}
+      APIFY_API_TOKEN: ${APIFY_API_TOKEN}
+      # Market data provider
+      MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER}
+      TWELVE_DATA_API_KEY: ${TWELVE_DATA_API_KEY}
+      # Model caching
+      HF_HOME: /models
+    command: ["python", "-m", "app.workers.main"]
+    volumes:
+      - hf_models:/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Resource limits (workers are CPU/IO intensive)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    # Graceful shutdown: allow 30s for job completion
+    stop_grace_period: 30s
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"

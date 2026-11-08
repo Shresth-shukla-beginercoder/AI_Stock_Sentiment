@@ -9,6 +9,7 @@ Comprehensive tests for:
 - Scheduler with advisory locks
 - Graceful shutdown
 - --once flag
+- Unsupported job types (train, unknown)
 """
 
 import pytest
@@ -545,18 +546,28 @@ def test_dispatch_unknown_job_type():
     """Dispatcher raises error for unknown job type."""
     job = CollectionJob(dedupe_key="test", job_type="unknown:type", status="running")
 
-    with pytest.raises(ValueError, match="Unknown job type"):
+    from app.workers.exceptions import UnsupportedJobError
+    with pytest.raises(UnsupportedJobError, match="unknown_job_type"):
         dispatch_job(Mock(), job)
 
 
-@patch("app.workers.dispatch.get_daily_prices")
-def test_dispatch_collect_market(mock_get_prices):
-    """Dispatcher routes collect:market to handler."""
-    from app.collectors.normalize import NormalizeResult
+@patch("app.collectors.twelve_data.TwelveDataProvider")
+@patch("app.services.persist.persist_market_prices")
+@patch("app.services.persist.resolve_asset")
+def test_dispatch_collect_market(mock_resolve, mock_persist, mock_provider_cls):
+    """Dispatcher routes collect:market to TwelveData + persist path."""
+    from app.collectors.provider import PriceRow
+    from datetime import datetime, timezone
 
-    mock_get_prices.return_value = NormalizeResult(
-        source="twelve_data", count=5, inserted=5, skipped_duplicates=0
-    )
+    mock_provider = MagicMock()
+    mock_provider_cls.return_value = mock_provider
+    mock_provider.get_daily_prices.return_value = [
+        PriceRow(ticker="TEST", trade_date=datetime(2026, 11, 8, 16, 0, tzinfo=timezone.utc),
+                 open=100.0, high=105.0, low=99.0, close=102.0)
+    ]
+
+    mock_resolve.return_value = MagicMock(id=1)
+    mock_persist.return_value = MagicMock(inserted=1, skipped_duplicates=0)
 
     job = CollectionJob(
         dedupe_key="test:market",
@@ -565,11 +576,39 @@ def test_dispatch_collect_market(mock_get_prices):
         params={"ticker": "TEST", "target_date": "2026-11-08"},
     )
 
-    result = dispatch_job(Mock(), job)
+    result = dispatch_job(MagicMock(), job)
 
-    assert result["source"] == "twelve_data"
-    assert result["fetched"] == 5
-    assert result["inserted"] == 5
+    assert result["provider"] == "twelvedata"
+    assert result["fetched"] == 1
+    assert result["inserted"] == 1
+    assert mock_resolve.called
+    assert mock_persist.called
+
+
+def test_dispatch_unsupported_train_job():
+    """Dispatcher raises UnsupportedJobError for 'train' job."""
+    from app.workers.exceptions import UnsupportedJobError
+
+    job = CollectionJob(dedupe_key="test:train", job_type="train", status="running")
+
+    with pytest.raises(UnsupportedJobError) as exc_info:
+        dispatch_job(Mock(), job)
+
+    assert exc_info.value.job_type == "train"
+    assert exc_info.value.reason == "handler_not_implemented_yet"
+
+
+def test_dispatch_unknown_job_type_raises():
+    """Dispatcher raises UnsupportedJobError for unknown job types."""
+    from app.workers.exceptions import UnsupportedJobError
+
+    job = CollectionJob(dedupe_key="test:unknown", job_type="unknown:type", status="running")
+
+    with pytest.raises(UnsupportedJobError) as exc_info:
+        dispatch_job(Mock(), job)
+
+    assert exc_info.value.job_type == "unknown:type"
+    assert exc_info.value.reason == "unknown_job_type"
 
 
 # ============================================================================

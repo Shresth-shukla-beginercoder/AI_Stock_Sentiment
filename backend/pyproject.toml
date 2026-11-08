@@ -2,7 +2,7 @@
 name = "ai-stock-backend"
 version = "1.0.0"
 description = "AI Stock Sentiment & Next-Day Prediction Agent — backend"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.30",
