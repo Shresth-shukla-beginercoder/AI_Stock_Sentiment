@@ -1,0 +1,16 @@
+{
+  "_comment": "Owner-provided assets seed. The loader ONLY reads the 'assets' array and inserts entries with confirmed=false (PENDING). It invents nothing: if 'assets' is empty it seeds nothing. The 'proposed_pending_confirmation' list is documentation only and is NEVER seeded until the owner moves entries into 'assets' (optionally with confirmed:true).",
+  "assets": [],
+  "proposed_pending_confirmation": [
+    {"exchange": "HKEX", "ticker": "0700", "name": "Tencent", "provider_ticker": "0700.HK"},
+    {"exchange": "HKEX", "ticker": "9988", "name": "Alibaba", "provider_ticker": "9988.HK"},
+    {"exchange": "HKEX", "ticker": "1810", "name": "Xiaomi", "provider_ticker": "1810.HK"},
+    {"exchange": "HKEX", "ticker": "3690", "name": "Meituan", "provider_ticker": "3690.HK"},
+    {"exchange": "HKEX", "ticker": "0005", "name": "HSBC", "provider_ticker": "0005.HK"},
+    {"exchange": "KRX", "ticker": "005930", "name": "Samsung Electronics", "provider_ticker": "005930.KS"},
+    {"exchange": "KRX", "ticker": "000660", "name": "SK Hynix", "provider_ticker": "000660.KS"},
+    {"exchange": "KRX", "ticker": "035420", "name": "NAVER", "provider_ticker": "035420.KS"},
+    {"exchange": "KRX", "ticker": "035720", "name": "Kakao", "provider_ticker": "035720.KS"},
+    {"exchange": "KRX", "ticker": "005380", "name": "Hyundai Motor", "provider_ticker": "005380.KS"}
+  ]
+}

@@ -1,0 +1,32 @@
+[project]
+name = "ai-stock-backend"
+version = "1.0.0"
+description = "AI Stock Sentiment & Next-Day Prediction Agent — backend"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.3,<3",
+    "sqlalchemy>=2.0,<3",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+    "xgboost>=2.0",
+    "apify-client>=1.7",
+    "exa-py>=1.0",
+    "tenacity>=8.3",
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

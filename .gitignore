@@ -1,0 +1,29 @@
+# Secrets — never committed
+.env
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+
+# Hugging Face model cache (mounted volume, never in images or git)
+/models/
+
+# Docker named volumes / local data
+postgres_data/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

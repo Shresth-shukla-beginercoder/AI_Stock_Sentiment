@@ -1,0 +1,90 @@
+# AI Stock Sentiment Agent — development compose
+#
+# Ports:
+#   postgres -> 5437:5432   (host:container, DEV ONLY; production compose omits this)
+#   backend  -> 8000
+#   (frontend lands in Phase 4: host 3000 -> nginx 80)
+#
+# Real environment variables always beat .env. Secrets come from .env (git-ignored).
+
+name: ai-stock-sentiment
+
+networks:
+  stock_network:
+    name: stock_network
+
+volumes:
+  postgres_data:
+    name: postgres_data
+  hf_models:
+    name: hf_models
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: ai_stock_postgres
+    networks:
+      - stock_network
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-stock}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stock_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-stock_sentiment}
+    ports:
+      - "5437:5432"   # dev-only host exposure
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # $$ escapes so compose interpolates the container env at healthcheck time.
+      test:
+        - CMD-SHELL
+        - "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} -q"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: ${DOCKERHUB_USERNAME:-local}/ai-stock-backend:1.0.0
+    container_name: ai_stock_backend
+    networks:
+      - stock_network
+    environment:
+      # Compose overrides so the container talks to the service name/port,
+      # while .env keeps the laptop defaults (localhost:5437).
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-stock}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stock_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-stock_sentiment}
+      DATA_MODE: ${DATA_MODE:-demo}
+      API_ADMIN_KEY: ${API_ADMIN_KEY:-}
+      EXA_API_KEY: ${EXA_API_KEY:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      APIFY_API_KEY: ${APIFY_API_KEY:-}
+      MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER:-}
+      TWELVE_DATA_API_KEY: ${TWELVE_DATA_API_KEY:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      HOST: "0.0.0.0"
+      PORT: "8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      - hf_models:/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # CPU slims have no curl; use Python's stdlib urllib.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
