@@ -27,3 +27,11 @@ postgres_data/
 .idea/
 .DS_Store
 Thumbs.db
+
+
+# Claude Code - private project instructions
+CLAUDE.md
+
+# Internal project progress and verification
+docs/PROGRESS.md
+docs/VERIFICATION.md
