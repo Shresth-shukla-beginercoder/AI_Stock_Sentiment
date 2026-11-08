@@ -67,6 +67,7 @@ services:
       APIFY_API_KEY: ${APIFY_API_KEY:-}   # legacy alias; APIFY_API_TOKEN wins when both set
       MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER:-}
       TWELVE_DATA_API_KEY: ${TWELVE_DATA_API_KEY:-}
+      HF_HOME: /models
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       HOST: "0.0.0.0"
       PORT: "8000"
@@ -106,5 +107,37 @@ services:
         condition: service_healthy
     ports:
       - "3000:80"
+    restart: unless-stopped
+
+  # Phase 7: background worker. Reuses the backend image but runs the
+  # worker entry point instead of the API server. Handles job claiming,
+  # dispatch, retry, reaping, and scheduling.
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: ${DOCKERHUB_USERNAME:-local}/ai-stock-worker:1.0.0
+    container_name: ai_stock_worker
+    networks:
+      - stock_network
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-stock}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stock_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-stock_sentiment}
+      DATA_MODE: ${DATA_MODE:-demo}
+      EXA_API_KEY: ${EXA_API_KEY:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      APIFY_API_TOKEN: ${APIFY_API_TOKEN:-}
+      MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER:-}
+      TWELVE_DATA_API_KEY: ${TWELVE_DATA_API_KEY:-}
+      HF_HOME: /models
+    command: ["python", "-m", "app.workers.main"]
+    volumes:
+      - hf_models:/models
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 

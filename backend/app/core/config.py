@@ -63,6 +63,15 @@ class Settings(BaseSettings):
     provider_batch_limit: int = 120  # max bars / results fetched per call
     collection_window_days: int = 10  # lookback for news / social (CLAUDE.md)
 
+    # --- Sentiment engine (Phase 6) ---
+    sentiment_social_weight: float = 0.4  # CLAUDE.md: social weight in combined score
+    sentiment_news_weight: float = 0.6    # CLAUDE.md: news weight in combined score
+    sentiment_threshold_bullish: float = 0.15   # score > 0.15 → bullish signal
+    sentiment_threshold_bearish: float = -0.15  # score < -0.15 → bearish signal
+    sentiment_min_items: int = 5  # min posts+news for sufficient data
+    sentiment_window_days: int = 10  # rolling window for aggregation
+    hf_cache_dir: str = "/models"  # Hugging Face model cache (hf_models volume)
+
     # ------------------------------------------------------------------ utils
     @property
     def cors_origin_list(self) -> list[str]:

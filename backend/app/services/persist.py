@@ -7,16 +7,19 @@ dedupe constraints:
 - news_articles: (url_hash)
 - social_posts:  (source, content_hash)
 
-Guarantees (CLAUDE.md data rules):
+Guarantees (CLAUDE.md data rules + Phase 5 corrections):
 - A duplicate key is a **no-op**, never an overwrite — re-running collection
   cannot duplicate or clobber valid rows.
 - Missing values stay NULL, never 0.
 - ``created_at`` is set by the Postgres ``now()`` server default (UTC); we never
-  pass local time.
-- ``published_at`` is NOT NULL in the schema; when a source has no publication
-  timestamp we fall back to the collection instant and *report the count* so the
-  fallback is transparent, not hidden.
+  pass local time. This is the collection timestamp.
+- ``published_at`` is **nullable** (Phase 5 correction 1): when a source has no
+  publication timestamp we preserve NULL honestly, never substitute collection
+  time. Downstream consumers distinguish unknown (NULL) from known (timestamp).
 - Schema is never changed here (no new columns / tables).
+- **Concurrent-safe** (Phase 5 correction 2): Uses ``ON CONFLICT DO NOTHING``
+  backed by unique constraints; no pre-query race. ``RETURNING *`` gives
+  actually-inserted rows for accurate counts.
 
 All functions take an active SQLAlchemy ``Session`` (caller controls commit /
 rollback) and run inside the caller's transaction.
@@ -25,10 +28,10 @@ rollback) and run inside the caller's transaction.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import select, and_
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.collectors.provider import PriceRow
@@ -46,7 +49,7 @@ class PersistResult:
     provider: str
     inserted: int
     skipped_duplicates: int
-    synthetic_timestamps: int = 0  # records that fell back to collection time
+    null_published_at: int = 0  # records with no source publication timestamp
 
 
 def resolve_asset(session: Session, ticker: str,
@@ -67,10 +70,6 @@ def resolve_asset(session: Session, ticker: str,
     return asset
 
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def persist_market_prices(
     session: Session,
     asset_id: int,
@@ -81,10 +80,10 @@ def persist_market_prices(
 ) -> PersistResult:
     """Upsert daily OHLCV bars. trade_date is stored as the UTC calendar date.
 
-    ``inserted``/``skipped`` come from a pre-insert existence query (Postgres
-    does not report a reliable rowcount for ``ON CONFLICT DO NOTHING``).
+    Concurrent-safe: ``ON CONFLICT DO NOTHING`` backed by the unique constraint
+    on (asset_id, trade_date, provider). ``RETURNING *`` gives actually-inserted
+    rows for accurate counts (no race with other collectors).
     """
-    now = _utc_now()
     # One row per trading day: dedupe the batch by date (latest bar wins).
     by_date: dict[date, dict] = {}
     for r in rows:
@@ -99,34 +98,22 @@ def persist_market_prices(
             "close": r.close,
             "volume": r.volume,
             "is_demo": is_demo,
-            "created_at": now,
+            # created_at omitted → Postgres server default now()
         }
     payload = list(by_date.values())
     if not payload:
         return PersistResult(provider, 0, 0, 0)
 
-    dates = [p["trade_date"] for p in payload]
-    existing = session.execute(
-        select(MarketPrice.trade_date).where(
-            and_(
-                MarketPrice.asset_id == asset_id,
-                MarketPrice.provider == provider,
-                MarketPrice.trade_date.in_(dates),
-            )
-        )
-    ).scalars().all()
-    existing_set = set(existing)
-    new_rows = [p for p in payload if p["trade_date"] not in existing_set]
-    inserted = len(new_rows)
-    skipped = len(payload) - inserted
-
     stmt = (
         pg_insert(MarketPrice)
-        .values(new_rows)
+        .values(payload)
         .on_conflict_do_nothing(index_elements=["asset_id", "trade_date", "provider"])
+        .returning(MarketPrice.id)
     )
-    if new_rows:  # an all-duplicate batch must not emit "INSERT ... VALUES ()"
-        session.execute(stmt)
+    result = session.execute(stmt)
+    inserted = len(result.fetchall())
+    skipped = len(payload) - inserted
+
     _log.info("persist market prices",
               extra={"provider": provider, "asset_id": asset_id,
                      "inserted": inserted, "skipped_duplicates": skipped})
@@ -143,19 +130,20 @@ def persist_news(
     """Upsert news candidates (NewsItem) keyed by url_hash.
 
     Items without a URL (and therefore no url_hash) are dropped with a log line,
-    never coerced to a fake URL. Missing published_at -> collection instant.
+    never coerced to a fake URL. Missing published_at → NULL (Phase 5 correction 1).
+
+    Concurrent-safe: ``ON CONFLICT DO NOTHING`` backed by the unique constraint
+    on (url_hash). ``RETURNING *`` gives actually-inserted rows.
     """
-    now = _utc_now()
     payload = []
-    synthetic = 0
+    null_published = 0
     dropped = 0
     for it in items:
         if not it.url_hash:
             dropped += 1
             continue
-        pub = it.published_at or now
         if it.published_at is None:
-            synthetic += 1
+            null_published += 1
         payload.append({
             "asset_id": asset_id,
             "source": it.source,
@@ -163,18 +151,17 @@ def persist_news(
             "title": it.title or "",  # title is NOT NULL; empty title is honest
             "body": it.body,
             "url": it.url,
-            "published_at": pub,
+            "published_at": it.published_at,  # NULL stays NULL (Phase 5 correction)
             "is_demo": is_demo,
-            "created_at": now,
+            # created_at omitted → Postgres server default now()
         })
     if dropped:
         _log.warning("persist news: dropped records without URL/hash",
                      extra={"provider": "exa", "dropped": dropped})
     if not payload:
-        return PersistResult("exa", 0, 0, synthetic)
+        return PersistResult("exa", 0, 0, null_published)
 
-    # Dedupe the batch by url_hash (first occurrence wins), then compute how
-    # many are genuinely new vs already present.
+    # Dedupe the batch by url_hash (first occurrence wins).
     seen: set[str] = set()
     unique_payload = []
     for p in payload:
@@ -183,27 +170,20 @@ def persist_news(
         seen.add(p["url_hash"])
         unique_payload.append(p)
 
-    existing = session.execute(
-        select(NewsArticle.url_hash).where(
-            NewsArticle.url_hash.in_([p["url_hash"] for p in unique_payload])
-        )
-    ).scalars().all()
-    existing_set = set(existing)
-    new_rows = [p for p in unique_payload if p["url_hash"] not in existing_set]
-    inserted = len(new_rows)
-    skipped = len(unique_payload) - inserted
-
     stmt = (
         pg_insert(NewsArticle)
-        .values(new_rows)
+        .values(unique_payload)
         .on_conflict_do_nothing(index_elements=["url_hash"])
+        .returning(NewsArticle.id)
     )
-    if new_rows:  # an all-duplicate batch must not emit "INSERT ... VALUES ()"
-        session.execute(stmt)
+    result = session.execute(stmt)
+    inserted = len(result.fetchall())
+    skipped = len(unique_payload) - inserted
+
     _log.info("persist news",
               extra={"asset_id": asset_id, "inserted": inserted,
-                     "skipped_duplicates": skipped, "synthetic_timestamps": synthetic})
-    return PersistResult("exa", inserted, skipped, synthetic)
+                     "skipped_duplicates": skipped, "null_published_at": null_published})
+    return PersistResult("exa", inserted, skipped, null_published)
 
 
 def persist_social(
@@ -213,16 +193,18 @@ def persist_social(
     *,
     is_demo: bool = False,
 ) -> PersistResult:
-    """Upsert social candidates (SocialPostItem) keyed by (source, content_hash)."""
-    now = _utc_now()
+    """Upsert social candidates (SocialPostItem) keyed by (source, content_hash).
+
+    Missing published_at → NULL (Phase 5 correction 1), never substituted with
+    collection time. Concurrent-safe via ``ON CONFLICT DO NOTHING``.
+    """
     payload = []
-    synthetic = 0
+    null_published = 0
     for it in items:
         if not it.content:
             continue  # a post with no discussion text is not kept
-        pub = it.published_at or now
         if it.published_at is None:
-            synthetic += 1
+            null_published += 1
         payload.append({
             "asset_id": asset_id,
             "source": it.source,
@@ -230,13 +212,13 @@ def persist_social(
             "content": it.content,
             "language": it.language,
             "url": it.url,
-            "published_at": pub,
+            "published_at": it.published_at,  # NULL stays NULL (Phase 5 correction)
             "engagement": it.engagement,  # NULL when unknown, never 0
             "is_demo": is_demo,
-            "created_at": now,
+            # created_at omitted → Postgres server default now()
         })
     if not payload:
-        return PersistResult("apify", 0, 0, synthetic)
+        return PersistResult("apify", 0, 0, null_published)
 
     # Dedupe the batch by (source, content_hash), first occurrence wins.
     seen: set[tuple] = set()
@@ -248,28 +230,17 @@ def persist_social(
         seen.add(key)
         unique_payload.append(p)
 
-    existing_pairs = session.execute(
-        select(SocialPost.source, SocialPost.content_hash).where(
-            and_(
-                SocialPost.source.in_([p["source"] for p in unique_payload]),
-                SocialPost.content_hash.in_([p["content_hash"] for p in unique_payload]),
-            )
-        )
-    ).all()
-    existing_set = {(s, h) for (s, h) in existing_pairs}
-    new_rows = [p for p in unique_payload
-                if (p["source"], p["content_hash"]) not in existing_set]
-    inserted = len(new_rows)
-    skipped = len(unique_payload) - inserted
-
     stmt = (
         pg_insert(SocialPost)
-        .values(new_rows)
+        .values(unique_payload)
         .on_conflict_do_nothing(index_elements=["source", "content_hash"])
+        .returning(SocialPost.id)
     )
-    if new_rows:  # an all-duplicate batch must not emit "INSERT ... VALUES ()"
-        session.execute(stmt)
+    result = session.execute(stmt)
+    inserted = len(result.fetchall())
+    skipped = len(unique_payload) - inserted
+
     _log.info("persist social",
               extra={"asset_id": asset_id, "inserted": inserted,
-                     "skipped_duplicates": skipped, "synthetic_timestamps": synthetic})
-    return PersistResult("apify", inserted, skipped, synthetic)
+                     "skipped_duplicates": skipped, "null_published_at": null_published})
+    return PersistResult("apify", inserted, skipped, null_published)

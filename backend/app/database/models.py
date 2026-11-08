@@ -119,7 +119,7 @@ class SocialPost(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     language: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
-    published_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    published_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
     # Engagement may be unknown — NULL, never 0.
     engagement: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     is_demo: Mapped[bool] = mapped_column(
@@ -154,7 +154,7 @@ class NewsArticle(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
-    published_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    published_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
     is_demo: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
