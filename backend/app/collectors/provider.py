@@ -25,14 +25,15 @@ class PriceRow:
     """A single daily OHLCV bar, aligned to the provider's trading calendar.
 
     Fields that are unknown are None (never 0). ``trade_date`` is a timezone-
-    aware UTC datetime representing the session close.
+    aware UTC datetime representing the session close. ``close`` is required
+    (a bar without a close is malformed); open/high/low/volume may be None.
     """
 
     ticker: str
     trade_date: datetime  # UTC, aware
-    open: float
-    high: float
-    low: float
+    open: Optional[float]
+    high: Optional[float]
+    low: Optional[float]
     close: float
     volume: Optional[int] = None  # None = unknown
 

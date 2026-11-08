@@ -63,7 +63,8 @@ services:
       API_ADMIN_KEY: ${API_ADMIN_KEY:-}
       EXA_API_KEY: ${EXA_API_KEY:-}
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}
-      APIFY_API_KEY: ${APIFY_API_KEY:-}
+      APIFY_API_TOKEN: ${APIFY_API_TOKEN:-}
+      APIFY_API_KEY: ${APIFY_API_KEY:-}   # legacy alias; APIFY_API_TOKEN wins when both set
       MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER:-}
       TWELVE_DATA_API_KEY: ${TWELVE_DATA_API_KEY:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
@@ -88,3 +89,22 @@ services:
       retries: 5
       start_period: 20s
     restart: unless-stopped
+
+  # Phase 4: static React console. Nginx serves the build and proxies /api/
+  # to the backend service. Host 3000 -> container 80. No DB, ports or
+  # volume changes; the browser only ever talks to same-origin /api.
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: ${DOCKERHUB_USERNAME:-local}/ai-stock-frontend:1.0.0
+    container_name: ai_stock_frontend
+    networks:
+      - stock_network
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+

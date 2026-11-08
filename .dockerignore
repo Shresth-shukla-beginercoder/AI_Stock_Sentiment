@@ -8,6 +8,9 @@ venv/
 .pytest_cache/
 node_modules/
 dist/
+frontend/node_modules/
+frontend/dist/
+frontend/.env
 /models/
 postgres_data/
 *.md

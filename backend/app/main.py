@@ -1,10 +1,11 @@
 """FastAPI application factory.
 
-Phase 1 scope:
+Phase 1: liveness/readiness. Phase 3: full API contract + demo-data layer.
 - App factory with lifespan + CORS.
-- Liveness: GET /api/health
+- Liveness: GET /api/health (independent of DB)
 - Readiness: GET /api/ready (PostgreSQL connectivity)
-Everything else (business routes) is added in Phase 3+.
+- Business routes: assets, posts, news, prices, sentiment, predictions,
+  reports, models, jobs, collection/training (see app.api.routes).
 """
 
 from contextlib import asynccontextmanager
@@ -12,7 +13,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.errors import install_exception_handlers
 from app.api.health import router as health_router
+from app.api.routes import router as routes_router
 from app.core.config import get_settings
 from app.core.logging import get_logger, setup_logging
 
@@ -43,9 +46,13 @@ def create_app() -> FastAPI:
         version="1.0.0",
         description=(
             "Research platform: social + news sentiment for HKEX/KRX stocks, "
-            "experimental next-day return model. Not financial advice."
+            "experimental next-day return model. Not financial advice. "
+            "Responses carry data_mode (demo/live) and as_of (UTC ISO-8601)."
         ),
         lifespan=lifespan,
+        openapi_url="/api/openapi.json",
+        docs_url="/docs",
+        redoc_url=None,
     )
 
     # CORS: explicit origin list from config, never "*".
@@ -57,7 +64,10 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    install_exception_handlers(app)
+
     app.include_router(health_router, prefix="/api")
+    app.include_router(routes_router, prefix="/api")
 
     return app
 

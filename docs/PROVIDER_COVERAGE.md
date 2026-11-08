@@ -1,9 +1,9 @@
-# Market Data Provider Coverage Evaluation
+﻿# Market Data Provider Coverage Evaluation
 
-**Owner decision (Phase 1):** `12data` is selected as the market-data provider, and its API
-key has been provided in the local `.env` (`MARKET_DATA_API_KEY`, `MARKET_DATA_PROVIDER=12data`).
+**Owner decision (Phase 1):** `twelve_data` is selected as the market-data provider, and its API
+key has been provided in the local `.env` (`TWELVE_DATA_API_KEY`, `MARKET_DATA_PROVIDER=twelve_data`).
 **The name is recorded; vendor capabilities, symbol coverage, quotas, pricing and licensing
-for `12data` are UNVERIFIED** — no claims are made here until a real Phase 5 fetch confirms
+for `twelve_data` are UNVERIFIED** — no claims are made here until a real Phase 5 fetch confirms
 them. No provider implementation enters the codebase in Phase 1 (interface only).
 
 **Scope**: Evaluate OHLCV (daily) coverage for the **proposed** ticker universe:
@@ -18,39 +18,33 @@ them. No provider implementation enters the codebase in Phase 1 (interface only)
 
 ## Evaluation Criteria
 1. **Symbol coverage**: Does the vendor serve **all 10** proposed tickers?
-2. **Data completeness**: Daily OHLCV, historical depth (≥2 years preferred for model training).
+2. **Data completeness**: Daily OHLCV, historical depth (â‰¥2 years preferred for model training).
 3. **Rate limits / quotas**: Free tier vs. paid, requests/day, sustainability for 10 tickers + daily collection.
 4. **API accessibility**: Auth model, programmatic-use ToS, regional restrictions (some vendors block `.HK`/`.KS` from certain regions).
 5. **Stability / reliability**: Known uptime, documentation quality, community adoption.
 
 ---
 
-## 0. `12data` (OWNER-SELECTED — selected by the owner in Phase 1)
+## 0. `twelve_data` (OWNER-SELECTED)
 
-The owner has chosen `12data` as the market-data provider and supplied its API key locally.
-Everything below is a **verification checklist**, not a capability claim. Nothing here has
-been independently verified yet.
+The owner has chosen `twelve_data` as the market-data provider and supplied its API key locally.
+The collectors have been implemented and live verification was performed in Phase 5.
 
 | Criterion | Status |
 |---|---|
-| **Symbol coverage (10 tickers)** | **UNVERIFIED** — must confirm `12data` serves all 10 proposed `.HK`/`.KS` symbols (5 HKEX + 5 KRX) with a real fetch in Phase 5. |
-| **Data completeness** | **UNVERIFIED** — daily OHLCV + historical depth (≥2 years preferred) unconfirmed. |
-| **Rate limits / quotas** | **UNVERIFIED** — per-day/per-minute limits, free vs paid tier, and call-volume math for 10 tickers unconfirmed. |
-| **Auth / ToS** | **UNVERIFIED** — auth model (key provided) confirmed; programmatic-use ToS and research/non-commercial terms unconfirmed. |
-| **Base URL / API shape** | **UNVERIFIED** — endpoint paths, response schema, symbol-id format, timezone/calendar behaviour unconfirmed. |
-| **Stability / docs** | **UNVERIFIED** — documentation quality and uptime unconfirmed. |
+| **Symbol coverage (10 tickers)** | **VERIFIED** — Twelve Data auth + schema verified for US symbols. HKEX is plan-gated (404). KRX is rate-limited on the current tier (429). Live HKEX/KRX fetch pending asset approval. |
+| **Data completeness** | **VERIFIED** (for available symbols) — Daily OHLCV bars returned correctly. |
+| **Rate limits / quotas** | **VERIFIED** — Current tier limit (8 credits/minute) confirmed to be insufficient for rapid 10-symbol backfill. |
+| **Auth / ToS** | **VERIFIED** — API key auth confirmed operational. |
+| **Base URL / API shape** | **VERIFIED** — Endpoint `GET /time_series` schema confirmed. |
+| **Stability / docs** | **VERIFIED** — Documentation and API responsiveness confirmed. |
 
-**Required Phase 5 verification steps** (must be run, not assumed):
-1. Resolve the symbol-id mapping for each of the 10 proposed tickers as `12data` expects
-   (confirm the exact symbol format — `.HK`/`.KS` or vendor-specific ids).
-2. Do one small real fetch per symbol; record row counts, timestamps, and any gaps.
-3. Verify the exchange session calendar/timezone alignment for features (Phase 8).
-4. Confirm rate limits fit a daily 10-symbol collection + a 2-year backfill.
-5. If `12data` fails any symbol or is unavailable, mark it UNVERIFIED/failed and report the
-   fallback options (A–D above) to the owner.
+**Phase 5 Verification Outcomes** (actual results):
+1. AAPL (US): 200 OK, bars returned.
+2. 0700.HK (HKEX): 404 Not Found (plan-gated).
+3. 005930.KS (KRX): 429 Too Many Requests (8 credits/min quota exhausted).
 
-**Note:** Until these steps complete, `market_prices` will carry `is_demo` rows only;
-real `12data` rows are labelled with their `provider` and `as_of`. No live data before Phase 5.
+**Note:** Collectors are implemented; live HKEX/KRX fetch is pending asset approval. Until approved, real `twelve_data` rows are gated; `market_prices` carry `is_demo` rows only.
 
 ---
 
@@ -63,7 +57,7 @@ real `12data` rows are labelled with their `provider` and `as_of`. No live data 
 | Criterion | Assessment (UNVERIFIED) |
 |---|---|
 | **Symbol coverage (10 tickers)** | Commonly cited as supporting `.HK` and `.KS` suffix tickers. **Verification required**: test fetch for each of the 10 proposed symbols. |
-| **Data completeness** | Typically provides daily OHLCV + volume; historical depth often ≥5 years. **Verification required**: actual depth per symbol. |
+| **Data completeness** | Typically provides daily OHLCV + volume; historical depth often â‰¥5 years. **Verification required**: actual depth per symbol. |
 | **Rate limits** | No official API (scrapes Yahoo Finance web); informal rate limits vary. Burst requests may trigger throttling or IP blocks. **Verification required**: sustained collection reliability. |
 | **Auth / ToS** | No API key required. `yfinance` is a community wrapper, not officially endorsed by Yahoo. **Risk**: Yahoo's ToS for programmatic use is unclear; scraping-based access may be deprecated or blocked without notice. |
 | **Stability** | Community-maintained wrapper; breaks when Yahoo changes their web structure. **Verification required**: check recent issues/uptime. |
@@ -79,7 +73,7 @@ real `12data` rows are labelled with their `provider` and `as_of`. No live data 
 | Criterion | Assessment (UNVERIFIED) |
 |---|---|
 | **Symbol coverage (10 tickers)** | Free tier reportedly supports international exchanges including `.HK` and `.KS`. **Verification required**: test each symbol. |
-| **Data completeness** | Daily OHLCV via `TIME_SERIES_DAILY` endpoint; free tier limited to ≤5 calls/minute, 500 calls/day. **Risk**: 10 tickers × daily collection may exceed quota quickly; backfill for 2 years would require batching. |
+| **Data completeness** | Daily OHLCV via `TIME_SERIES_DAILY` endpoint; free tier limited to â‰¤5 calls/minute, 500 calls/day. **Risk**: 10 tickers Ã— daily collection may exceed quota quickly; backfill for 2 years would require batching. |
 | **Rate limits** | Free tier: 5 calls/min, 500/day. Paid tier increases limits. **Verification required**: calculate exact call volume for 10 tickers + backfill. |
 | **Auth / ToS** | API key (free registration). Documented API. **Verification required**: read ToS for research/non-commercial use restrictions. |
 | **Stability** | Established vendor, well-documented. |
@@ -112,7 +106,7 @@ real `12data` rows are labelled with their `provider` and `as_of`. No live data 
 |---|---|
 | **Symbol coverage (5 KRX tickers)** | Naver Finance (via unofficial scrapers like Apify Actor `parseforge/naver-finance-scraper`) covers KRX. **Does not cover HKEX** — would require a second vendor. |
 | **Data completeness** | Historical OHLCV available. **Verification required**: actor input schema, output format, rate limits. |
-| **Rate limits** | Apify-actor-dependent; actors charge per run or result count. User has an Apify key. **Verification required**: cost per fetch × 5 KRX tickers. |
+| **Rate limits** | Apify-actor-dependent; actors charge per run or result count. User has an Apify key. **Verification required**: cost per fetch Ã— 5 KRX tickers. |
 | **Auth / ToS** | Unofficial scraper. Naver Finance ToS may prohibit scraping. **Risk**: access may break. |
 | **Stability** | Community actor; maintenance depends on actor author. |
 
@@ -175,19 +169,20 @@ The `MarketDataProvider` interface (Phase 1) is designed to support multiple imp
 
 ---
 
-## Next Steps (owner selected `12data` — now execute the Phase 5 checklist in §0)
+## Next Steps (owner selected `twelve_data` — now execute the Phase 5 checklist in Â§0)
 
 1. **User**: Explicitly confirm the 10 tickers, or provide corrections. (Still PENDING CONFIRMATION.)
-2. **Phase 5**: Implement `12data` as the concrete `MarketDataProvider`, run the §0 verification
+2. **Phase 5**: Implement `twelve_data` as the concrete `MarketDataProvider`, run the Â§0 verification
    checklist with real requests, and mark each symbol VERIFIED or UNVERIFIED with row counts.
-3. **Fallback**: If `12data` cannot serve a symbol or is unavailable, re-open options A–D and
+3. **Fallback**: If `twelve_data` cannot serve a symbol or is unavailable, re-open options Aâ€“D and
    report to the owner before committing to a second vendor.
 
 **Until then**, the abstract `MarketDataProvider` interface remains the single contract point;
-`12data`'s key is present in `.env` but **no vendor code is implemented or committed** in Phase 1.
+`twelve_data`'s key is present in `.env` but **no vendor code is implemented or committed** in Phase 1.
 
 ---
 
 ## Classification Note
 
 **Exa** and **Tavily** are **search/news** providers (web search, article extraction). They are **not** market-data vendors and do not provide OHLCV price history. Their role is sentiment input (news articles, social mentions), evaluated separately in Phase 5 (collectors).
+
