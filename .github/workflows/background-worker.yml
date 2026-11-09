@@ -96,7 +96,7 @@ jobs:
               exit 1
             fi
             echo "$OUT"
-            if echo "$OUT" | grep -q "no jobs available"; then
+            if echo "$OUT" | grep -Eq "no jobs available|no confirmed assets found, nothing to schedule"; then
               echo "Queue drained (no eligible jobs) at iteration $i"
               break
             fi
