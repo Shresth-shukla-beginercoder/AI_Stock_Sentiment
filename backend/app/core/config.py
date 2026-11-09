@@ -106,12 +106,33 @@ class Settings(BaseSettings):
         return None
 
     def missing_credentials(self) -> list[str]:
-        """Names (upper-cased env var form) of credentials that are unset."""
-        return [f.upper() for f in self.CREDENTIAL_FIELDS if not getattr(self, f)]
+        """Names (upper-cased env var form) of credentials that are unset.
+
+        The two Apify names (APIFY_API_TOKEN canonical, APIFY_API_KEY alias)
+        satisfy the *same* requirement — Apify is configured when either is set
+        (see apify_token()). So we never flag the empty sibling as missing:
+          - Apify usable  -> neither Apify name is reported missing.
+          - Apify not usable (both unset) -> report a single name to set
+            (APIFY_API_KEY), not two.
+        """
+        missing = [f.upper() for f in self.CREDENTIAL_FIELDS if not getattr(self, f)]
+        if self.apify_token():
+            missing = [m for m in missing if m not in ("APIFY_API_TOKEN", "APIFY_API_KEY")]
+        else:
+            missing = [m for m in missing if m != "APIFY_API_TOKEN"]
+        return missing
 
     def configured_credentials(self) -> list[str]:
-        """Names (upper-cased env var form) of credentials that are set."""
-        return [f.upper() for f in self.CREDENTIAL_FIELDS if getattr(self, f)]
+        """Names (upper-cased env var form) of credentials that are set.
+
+        Reports the specific Apify name that is actually present (token or key),
+        so a user relying on the APIFY_API_KEY alias isn't also told the
+        token is configured.
+        """
+        configured = [f.upper() for f in self.CREDENTIAL_FIELDS if getattr(self, f)]
+        # Both Apify names set is valid; keep whichever the user provided.
+        return configured
+
 
 
 @lru_cache
