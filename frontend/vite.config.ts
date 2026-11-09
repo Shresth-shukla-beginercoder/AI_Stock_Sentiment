@@ -18,5 +18,16 @@ export default defineConfig({
   build: {
     outDir: "dist",
     sourcemap: false,
+    // Split heavy vendor libs into parallel-loaded chunks so the app chunk
+    // stays small and the browser can fetch/reuse vendors independently.
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          react: ["react", "react-dom", "react-router-dom"],
+          motion: ["framer-motion"],
+          charts: ["recharts"],
+        },
+      },
+    },
   },
 });

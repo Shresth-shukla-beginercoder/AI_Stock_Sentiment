@@ -11,16 +11,18 @@ import {
 } from "recharts";
 import { useApi } from "../hooks/useApi";
 import { listEvaluations, listModelVersions } from "../api/endpoints";
+import { PageContainer } from "../components/layout";
 import {
   Card,
+  CardContent,
   CardHeader,
+  StatusBadge,
+  DataModeBadge,
+  DataTable,
   EmptyState,
   ErrorState,
-  PageContainer,
-} from "../components/states";
-import { StatusBadge, DataModeBadge } from "../components/StatusBadge";
-import { DataTable, type Column } from "../components/DataTable";
-import { ApiResponsePanel } from "../components/ApiResponsePanel";
+  type Column,
+} from "../components/common";
 import { fmtDate, fmtNum, fmtPct } from "../utils/format";
 import type { Envelope, ModelEvaluation, ModelVersionsData } from "../types/api";
 
@@ -45,7 +47,7 @@ const EVAL_COLS: Column<ModelEvaluation>[] = [
     header: "Commit",
     render: (e) =>
       e.git_commit ? (
-        <span className="font-mono text-xs text-slate-300" title={e.git_commit}>{e.git_commit.slice(0, 12)}</span>
+        <span className="font-mono text-xs text-text-primary" title={e.git_commit}>{e.git_commit.slice(0, 12)}</span>
       ) : (
         <StatusBadge tone="neutral">unrecorded</StatusBadge>
       ),
@@ -75,77 +77,80 @@ export function ModelPerformance() {
   return (
     <PageContainer
       title="Model Performance"
-      subtitle="Walk-forward evaluation metrics, exactly as the API reports them. No metrics are fabricated when a model does not exist."
+      subtitle="Walk-forward evaluation metrics, exactly as the API reports them."
     >
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        {versions.data?.versions.length ? (
-          versions.data.versions.map((v) => (
-            <StatusBadge key={v} tone="neutral">
-              {v}
-            </StatusBadge>
-          ))
-        ) : (
-          <StatusBadge tone="warn">no model versions registered</StatusBadge>
-        )}
-        <DataModeBadge mode={evals.dataMode} />
-        {noModels ? (
-          <span className="text-xs text-muted">
-            Training arrives in Phase 8 — until then this page stays an empty state.
-          </span>
-        ) : null}
-      </div>
+      <div className="space-y-6">
+        {/* Versions strip */}
+        <div className="flex flex-wrap items-center gap-2">
+          {versions.data?.versions.length ? (
+            versions.data.versions.map((v) => <StatusBadge key={v} tone="neutral">{v}</StatusBadge>)
+          ) : (
+            <StatusBadge tone="warn">no model versions registered</StatusBadge>
+          )}
+          <DataModeBadge mode={evals.dataMode} />
+        </div>
 
-      {evals.status === "error" ? (
-        <ErrorState title="Could not load evaluations" detail={evals.error?.message} onRetry={evals.reload} />
-      ) : noModels ? (
-        <EmptyState
-          title="No trained model"
-          hint="model_evaluations is empty until a real Phase 8 training run persists metrics. Nothing is generated on the frontend."
-        />
-      ) : (
-        <div className="space-y-4">
-          {chartData.length > 0 ? (
+        {evals.status === "error" ? (
+          <ErrorState title="Could not load evaluations" message={evals.error?.message} onRetry={evals.reload} />
+        ) : noModels ? (
+          <EmptyState
+            title="No trained model"
+            description="model_evaluations is empty until a real training run persists metrics. Nothing is generated here."
+          />
+        ) : (
+          <div className="space-y-4">
+            {chartData.length > 0 && (
+              <Card>
+                <CardHeader title="Directional Accuracy vs Baselines" />
+                <CardContent>
+                  <ResponsiveContainer width="100%" height={240}>
+                    <BarChart data={chartData} barCategoryGap={12}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1a1f2e" vertical={false} />
+                      <XAxis dataKey="version" tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={{ stroke: "#1a1f2e" }} tickLine={false} />
+                      <YAxis
+                        tick={{ fill: "#94a3b8", fontSize: 11 }}
+                        tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
+                        domain={[0, 1]}
+                        width={48}
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          background: "#111827",
+                          border: "1px solid rgba(255,255,255,0.1)",
+                          borderRadius: "8px",
+                          fontSize: "12px",
+                        }}
+                        formatter={(v, n) => [fmtPct((v as number) ?? null, 1), String(n)]}
+                      />
+                      <Legend wrapperStyle={{ fontSize: 12 }} />
+                      <Bar dataKey="model" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                      <Bar dataKey="no-change" fill="#94a3b8" radius={[4, 4, 0, 0]} />
+                      <Bar dataKey="always-up" fill="#ef4444" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </CardContent>
+              </Card>
+            )}
+
             <Card>
-              <CardHeader title="Directional accuracy vs baselines" />
-              <div className="p-3">
-                <ResponsiveContainer width="100%" height={220}>
-                  <BarChart data={chartData} barCategoryGap={12}>
-                    <CartesianGrid stroke="#242f40" strokeDasharray="2 4" vertical={false} />
-                    <XAxis dataKey="version" tick={{ fill: "#8b98ab", fontSize: 11 }} />
-                    <YAxis
-                      tick={{ fill: "#8b98ab", fontSize: 11 }}
-                      tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
-                      domain={[0, 1]}
-                      width={48}
-                    />
-                    <Tooltip
-                      contentStyle={{ background: "#0f141c", border: "1px solid #242f40", borderRadius: 8, fontSize: 12 }}
-                      formatter={(v, n) => [fmtPct((v as number) ?? null, 1), String(n)]}
-                    />
-                    <Legend wrapperStyle={{ fontSize: 12 }} />
-                    <Bar dataKey="model" fill="#38bdf8" />
-                    <Bar dataKey="no-change" fill="#8b98ab" />
-                    <Bar dataKey="always-up" fill="#f87171" />
-                  </BarChart>
-                </ResponsiveContainer>
+              <CardHeader title="Evaluations" subtitle={`${evals.data?.length} rows`} />
+              <div className="max-h-96 overflow-y-auto">
+                <DataTable columns={EVAL_COLS} rows={evals.data ?? []} rowKey={(e) => e.id} />
               </div>
             </Card>
-          ) : null}
+          </div>
+        )}
 
-          <Card>
-            <CardHeader
-              title="Evaluations"
-              right={<span className="text-xs text-muted">{evals.data?.length} rows</span>}
-            />
-            <div className="max-h-96 overflow-y-auto">
-              <DataTable columns={EVAL_COLS} rows={evals.data ?? []} rowKey={(e) => e.id} />
-            </div>
-          </Card>
-        </div>
-      )}
-
-      <div className="mt-4">
-        <ApiResponsePanel state={evals} endpoint="/api/models/evaluation" />
+        <Card>
+          <CardHeader title="Raw Response" subtitle="GET /api/models/evaluation — exactly as received" />
+          <CardContent>
+            <pre className="max-h-64 overflow-auto rounded-lg bg-bg-tertiary/50 p-3 font-mono text-xs text-text-secondary">
+              {evals.raw ? JSON.stringify(evals.raw, null, 2) : "—"}
+            </pre>
+          </CardContent>
+        </Card>
       </div>
     </PageContainer>
   );
