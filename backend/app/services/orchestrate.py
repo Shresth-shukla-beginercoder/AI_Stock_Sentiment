@@ -14,7 +14,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from app.database.models import Asset, CollectionJob, SentimentResult, Prediction
-from app.collectors.twelve_data import TwelveDataProvider
+from app.collectors.chain import market_provider_chain, fetch_daily_prices
 from app.collectors.exa import ExaNewsCollector
 from app.collectors.apify import ApifySocialCollector
 from app.features.build_features import build_features, filter_for_training
@@ -70,7 +70,9 @@ class EndToEndPipeline:
         start_date: date,
         end_date: date,
     ) -> PipelineStage:
-        """Collect market prices from provider (Phase 5)."""
+        """Collect market prices via the provider chain (primary + yfinance fallback)."""
+        from app.core.config import get_settings
+
         try:
             if not asset or not asset.ticker:
                 return PipelineStage(
@@ -79,32 +81,38 @@ class EndToEndPipeline:
                     error="Asset or ticker missing",
                 )
 
-            provider = TwelveDataProvider(asset.ticker, start_date, end_date)
-            prices = provider.get_daily_prices()
+            settings = get_settings()
+            chain = market_provider_chain(
+                settings, asset.ticker, start_date, end_date,
+                exchange=asset.exchange,
+            )
+            provider, prices, attempts = fetch_daily_prices(chain)
 
             if not prices:
                 _log.info(
                     "collect_market: no prices returned",
-                    extra={"ticker": asset.ticker, "reason": "empty_result"},
+                    extra={"ticker": asset.ticker, "reason": "empty_result", "chain": attempts},
                 )
                 return PipelineStage(
                     success=True,
                     stage_name="collect_market",
                     records_processed=0,
-                    data={"reason": "empty_result"},
+                    data={"reason": "empty_result", "provider": provider.provider_name, "chain": attempts},
                 )
 
-            # Persist prices (handles deduplication via ON CONFLICT DO NOTHING)
-            persist_market_prices(self.session, asset.id, prices)
+            # Persist prices (handles deduplication via ON CONFLICT DO NOTHING),
+            # attributed to the provider that actually produced the bars.
+            persist_market_prices(self.session, asset.id, provider.provider_name, prices)
 
             _log.info(
                 "collect_market: success",
-                extra={"ticker": asset.ticker, "count": len(prices)},
+                extra={"ticker": asset.ticker, "count": len(prices), "provider": provider.provider_name},
             )
             return PipelineStage(
                 success=True,
                 stage_name="collect_market",
                 records_processed=len(prices),
+                data={"provider": provider.provider_name, "chain": attempts},
             )
 
         except Exception as e:

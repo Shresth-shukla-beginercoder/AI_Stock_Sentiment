@@ -53,6 +53,28 @@ class Settings(BaseSettings):
     market_data_provider: str = ""  # e.g. "twelve_data" when .env sets it
     twelve_data_api_key: SecretStr | None = None
 
+    # --- Phase 14: market-data fallback + Apify actor refs + ML determinism ---
+    # Keyless secondary provider appended behind the primary when the primary
+    # errors or returns no bars. "yfinance" by default so plan-gated HKEX /
+    # rate-limited KRX symbols stay retrievable. Vendor capability/ToS remain
+    # UNVERIFIED until a live fetch; bars fetched this way are stored under
+    # provider="yfinance" (per-row attribution). "" disables the fallback.
+    market_data_fallback: str = "yfinance"
+
+    # Apify actor refs per social platform (owner-supplied; UNVERIFIED until a
+    # real verify/run). Empty ref = not configured: the collector records that
+    # honestly and never invents an Actor id. The two HK defaults are the
+    # Phase 5 candidates.
+    apify_actor_lihkg: str = "claude_code_reviewer/lihkg-scraper-en"
+    apify_actor_telegram: str = "lofomachines/telegram-keyword-search-scraper"
+    apify_actor_kakao: str = ""
+    apify_actor_naver: str = ""
+
+    # ML determinism + out-of-sample rigor (Phase 14): fixed random seed and a
+    # strict chronological holdout period after the walk-forward CV.
+    ml_random_seed: int = 42
+    ml_holdout_ratio: float = 0.2
+
     # --- Provider collection operations (Phase 5) ---
     # Bounded timeouts / retries / batch size and the news+social lookback window.
     provider_timeout_seconds: float = 30.0

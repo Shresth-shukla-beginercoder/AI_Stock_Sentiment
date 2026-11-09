@@ -18,8 +18,14 @@ _log = get_logger("workers.dispatch")
 
 
 def handle_collect_market(session: Session, job: CollectionJob) -> Dict[str, Any]:
-    """Handle collect:market job - fetch daily price data via Twelve Data."""
-    from app.collectors.twelve_data import TwelveDataProvider
+    """Handle collect:market job - fetch daily prices via the provider chain.
+
+    Phase 14: the owner-selected primary provider (Twelve Data) runs first; a
+    keyless yfinance fallback is tried when the primary errors or returns no
+    bars (HKEX plan-gate 404 / KRX 429). Rows are persisted under the
+    provider that actually produced them, preserving per-row attribution.
+    """
+    from app.collectors.chain import market_provider_chain, fetch_daily_prices
     from app.services.persist import resolve_asset, persist_market_prices
 
     settings = get_settings()
@@ -33,34 +39,38 @@ def handle_collect_market(session: Session, job: CollectionJob) -> Dict[str, Any
     # For daily data, fetch a small window around the target date.
     start_date = target_date
     end_date = target_date
+    exchange = params.get("exchange")
 
-    _log.info("collecting market data", extra={"ticker": ticker, "date": target_date.isoformat()})
+    _log.info("collecting market data",
+              extra={"ticker": ticker, "date": target_date.isoformat()})
 
-    provider = TwelveDataProvider(ticker, start_date, end_date, settings=settings)
-    rows = provider.get_daily_prices()
+    chain = market_provider_chain(settings, ticker, start_date, end_date, exchange=exchange)
+    provider, rows, attempts = fetch_daily_prices(chain)
 
-    asset = resolve_asset(session, ticker, params.get("exchange"))
+    asset = resolve_asset(session, ticker, exchange)
     if asset is None:
         # Honest: never fabricate an asset. Log and report zero counts.
         _log.warning("collect:market: asset not resolved; skipping persistence",
                      extra={"ticker": ticker})
         return {
-            "provider": "twelvedata",
+            "provider": provider.provider_name,
             "fetched": len(rows),
             "inserted": 0,
             "skipped_duplicates": 0,
             "asset_resolved": False,
+            "chain": attempts,
         }
 
-    result = persist_market_prices(session, asset.id, "twelvedata", rows)
+    result = persist_market_prices(session, asset.id, provider.provider_name, rows)
     session.commit()
 
     return {
-        "provider": "twelvedata",
+        "provider": provider.provider_name,
         "fetched": len(rows),
         "inserted": result.inserted,
         "skipped_duplicates": result.skipped_duplicates,
         "asset_resolved": True,
+        "chain": attempts,
     }
 
 

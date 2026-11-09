@@ -20,6 +20,8 @@ dependencies = [
     "tenacity>=8.3",
     "httpx>=0.27",
     "pytest>=8.0",
+    # Phase 14: keyless market-data fallback behind the primary provider
+    "yfinance>=0.2.40",
     # Phase 6: Sentiment
     "transformers>=4.30,<5",
     "torch>=2.0,<3",

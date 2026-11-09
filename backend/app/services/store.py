@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import or_, select, func
 from sqlalchemy.orm import Session
 
 from app.database.models import (
@@ -26,8 +26,17 @@ from app.database.models import (
 
 
 def _match_asset(session: Session, ticker: str) -> Asset | None:
-    """Resolve a ticker by ticker or provider_ticker (NULL-safe)."""
-    q = select(Asset).where(func.coalesce(Asset.provider_ticker, Asset.ticker) == ticker)
+    """Resolve an asset by either identifier (NULL-safe).
+
+    A row carries two identifiers of the same asset: the raw ``ticker``
+    (e.g. ``"1810"``) and the vendor ``provider_ticker`` (e.g. ``"1810.HK"``).
+    Both must resolve to the row — the list endpoint surfaces the raw ticker,
+    so the detail/subresource lookups must accept it even when
+    ``provider_ticker`` is set. A NULL ``provider_ticker`` simply fails its
+    branch and the raw ticker still matches (never COALESCE: that made the
+    raw ticker unresolvable whenever the vendor symbol was present).
+    """
+    q = select(Asset).where(or_(Asset.ticker == ticker, Asset.provider_ticker == ticker))
     return session.execute(q).scalars().first()
 
 
