@@ -43,10 +43,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'   # matches backend/Dockerfile pin
           cache: 'pip'            # caches wheel downloads across runs
@@ -70,7 +70,7 @@ jobs:
           print('Database connectivity: OK')"
 
       - name: Restore Hugging Face model cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/hf_models
           # Bump vN when VERIFIED_MODELS in app/sentiment/language.py changes.
