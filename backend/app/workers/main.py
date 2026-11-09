@@ -17,7 +17,7 @@ from app.workers.dispatch import dispatch_job
 from app.workers.exceptions import UnsupportedJobError
 from app.workers.reaper import reap_stuck_jobs
 from app.workers.scheduler import run_scheduler
-from app.core.logging import get_logger
+from app.core.logging import get_logger, setup_logging
 
 _log = get_logger("workers.main")
 
@@ -189,6 +189,11 @@ def worker_loop(once: bool = False) -> None:
 def main():
     """Entry point for the worker."""
     once = "--once" in sys.argv
+
+    # Configure JSON stdout logging for standalone execution (Render worker,
+    # GitHub Actions). Without this, the standalone process has no handlers
+    # and all INFO logs are silently dropped.
+    setup_logging()
 
     try:
         worker_loop(once=once)
