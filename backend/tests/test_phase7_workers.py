@@ -551,20 +551,27 @@ def test_dispatch_unknown_job_type():
         dispatch_job(Mock(), job)
 
 
-@patch("app.collectors.twelve_data.TwelveDataProvider")
+@patch("app.collectors.chain.market_provider_chain")
 @patch("app.services.persist.persist_market_prices")
 @patch("app.services.persist.resolve_asset")
-def test_dispatch_collect_market(mock_resolve, mock_persist, mock_provider_cls):
-    """Dispatcher routes collect:market to TwelveData + persist path."""
+def test_dispatch_collect_market(mock_resolve, mock_persist, mock_chain):
+    """Dispatcher routes collect:market through the provider chain to persist.
+
+    The chain is mocked to a single primary provider so the test stays DB-free
+    and does not depend on the real Twelve Data / yfinance providers (or their
+    third-party imports) being installed. The real ``fetch_daily_prices`` runs
+    over the mock chain, so the dispatcher -> chain hand-off is still exercised.
+    """
     from app.collectors.provider import PriceRow
     from datetime import datetime, timezone
 
     mock_provider = MagicMock()
-    mock_provider_cls.return_value = mock_provider
+    mock_provider.provider_name = "twelvedata"
     mock_provider.get_daily_prices.return_value = [
         PriceRow(ticker="TEST", trade_date=datetime(2026, 11, 8, 16, 0, tzinfo=timezone.utc),
                  open=100.0, high=105.0, low=99.0, close=102.0)
     ]
+    mock_chain.return_value = [mock_provider]
 
     mock_resolve.return_value = MagicMock(id=1)
     mock_persist.return_value = MagicMock(inserted=1, skipped_duplicates=0)

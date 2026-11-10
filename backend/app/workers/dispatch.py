@@ -74,6 +74,77 @@ def handle_collect_market(session: Session, job: CollectionJob) -> Dict[str, Any
     }
 
 
+def handle_backfill_market(session: Session, job: CollectionJob) -> Dict[str, Any]:
+    """Handle a backfill:market job - fetch + persist ONE chunk of history.
+
+    Phase A1: the historical window is pre-chunked at enqueue time (one job per
+    chunk, dedupe_key ``backfill:market:{ticker}:{start}:{end}``), so this
+    handler fetches a single chunk - sized to stay under the provider's
+    per-call bar cap - and persists it under the provider that actually
+    produced the rows (primary Twelve Data, else yfinance fallback).
+
+    The chunk fetch is wrapped in ``bounded_retry`` so a yfinance rate limit
+    (429) or transport fault retries with backoff rather than failing the job.
+    Persistence is ``ON CONFLICT DO NOTHING`` on (asset_id, trade_date,
+    provider), so re-running a chunk never duplicates or overwrites existing
+    bars. Regular daily ``collect:market`` behaviour is untouched.
+    """
+    from app.collectors.chain import market_provider_chain, fetch_daily_prices
+    from app.collectors.retry import bounded_retry
+    from app.services.persist import resolve_asset, persist_market_prices
+
+    settings = get_settings()
+    params = job.params or {}
+    ticker = params.get("ticker")
+    start_iso = params.get("start")
+    end_iso = params.get("end")
+    if not (ticker and start_iso and end_iso):
+        raise ValueError(
+            "backfill:market requires params['ticker'], params['start'] and params['end']"
+        )
+
+    start = date.fromisoformat(start_iso)
+    end = date.fromisoformat(end_iso)
+    exchange = params.get("exchange")
+
+    _log.info("backfilling market chunk",
+              extra={"ticker": ticker, "start": start_iso, "end": end_iso})
+
+    chain = market_provider_chain(settings, ticker, start, end, exchange=exchange)
+
+    def _fetch():
+        return fetch_daily_prices(chain)
+
+    provider, rows, attempts = bounded_retry(_fetch, settings=settings)
+
+    asset = resolve_asset(session, ticker, exchange)
+    if asset is None:
+        _log.warning("backfill:market: asset not resolved; skipping persistence",
+                     extra={"ticker": ticker})
+        return {
+            "provider": provider.provider_name,
+            "fetched": len(rows),
+            "inserted": 0,
+            "skipped_duplicates": 0,
+            "asset_resolved": False,
+            "window": [start_iso, end_iso],
+            "chain": attempts,
+        }
+
+    result = persist_market_prices(session, asset.id, provider.provider_name, rows)
+    session.commit()
+
+    return {
+        "provider": provider.provider_name,
+        "fetched": len(rows),
+        "inserted": result.inserted,
+        "skipped_duplicates": result.skipped_duplicates,
+        "asset_resolved": True,
+        "window": [start_iso, end_iso],
+        "chain": attempts,
+    }
+
+
 def handle_collect_social(session: Session, job: CollectionJob) -> Dict[str, Any]:
     """Handle collect:social job - fetch social media posts via Apify.
 
@@ -294,6 +365,7 @@ def handle_score_sentiment(session: Session, job: CollectionJob) -> Dict[str, An
 # Dispatcher registry
 HANDLERS = {
     "collect:market": handle_collect_market,
+    "backfill:market": handle_backfill_market,
     "collect:social": handle_collect_social,
     "collect:news": handle_collect_news,
     "score:sentiment": handle_score_sentiment,

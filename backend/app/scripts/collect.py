@@ -6,12 +6,15 @@ how a human (or the Phase 7 worker, later) drives a bounded collection run.
 
 Subcommands
 -----------
-probe-market    Fetch + normalize prices, print a summary. NO persistence.
-probe-news      Run one news search, print a summary. NO persistence.
-verify-actors   Check each candidate Apify Actor exists / is accessible. NO run.
-collect-market  Fetch + persist prices for an *approved* asset (gated).
-collect-news    Search + persist news for an asset (gated on a real asset row).
-collect-social  Run + persist a verified Actor for an asset (gated).
+probe-market     Fetch + normalize prices, print a summary. NO persistence.
+probe-news       Run one news search, print a summary. NO persistence.
+verify-actors    Check each candidate Apify Actor exists / is accessible. NO run.
+collect-market   Fetch + persist prices for an *approved* asset (gated).
+collect-news     Search + persist news for an asset (gated on a real asset row).
+collect-social   Run + persist a verified Actor for an asset (gated).
+backfill-market  Enqueue historical market-price backfill jobs (enqueue-only).
+                 The background worker does the actual fetch + persist. Use
+                 --dry-run to preview the plan without touching the queue.
 
 The collect-* paths refuse to touch data for tickers that have no ``assets``
 row (or that are not confirmed), because the 10 proposed tickers are PENDING
@@ -20,6 +23,7 @@ the user's explicit confirmation. Probes are read-only and never persist.
 Run from the ``backend/`` directory::
 
     python -m app.scripts.collect probe-market --ticker 0700 --exchange HKEX --days 5
+    python -m app.scripts.collect backfill-market --dry-run --lookback-days 183
 """
 
 from __future__ import annotations
@@ -257,6 +261,109 @@ def collect_social(args) -> int:
     return 0
 
 
+def backfill_market(args) -> int:
+    """Enqueue historical market-price backfill jobs (enqueue-only).
+
+    Splits the lookback window into calendar chunks (each under the provider's
+    per-call bar cap) and enqueues one ``backfill:market`` job per
+    (confirmed asset, chunk) via ON CONFLICT DO NOTHING, so re-running is
+    idempotent. The background worker performs the actual fetch + persist.
+    ``--dry-run`` prints the plan and touches nothing (read-only).
+    """
+    from sqlalchemy import select, update, func
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from app.database.models import CollectionJob, Asset
+    from app.database.session import get_session_factory
+    from app.collectors.chunking import iter_chunk_windows
+
+    settings = get_settings()
+    days = args.lookback_days if args.lookback_days is not None else settings.backfill_default_days
+    chunk_days = args.chunk_days if args.chunk_days is not None else settings.backfill_chunk_trading_days
+
+    end = date.today()
+    start = end - timedelta(days=days)
+    chunk_ranges = iter_chunk_windows(start, end, chunk_days)
+
+    factory = get_session_factory()
+    with factory() as session:
+        q = (select(Asset)
+             .where(Asset.confirmed == True, Asset.active == True)  # noqa: E712
+             .order_by(Asset.exchange, Asset.ticker))
+        assets = list(session.execute(q).scalars().all())
+        if args.assets and args.assets.strip().lower() != "all":
+            wanted = {t.strip() for t in args.assets.split(",") if t.strip()}
+            assets = [a for a in assets
+                      if a.ticker in wanted or (a.provider_ticker and a.provider_ticker in wanted)]
+
+        jobs = []
+        for a in assets:
+            for cs, ce in chunk_ranges:
+                jobs.append({
+                    "dedupe_key": f"backfill:market:{a.ticker}:{cs.isoformat()}:{ce.isoformat()}",
+                    "job_type": "backfill:market",
+                    "status": "queued",
+                    "params": {
+                        "asset_id": a.id,
+                        "ticker": a.ticker,
+                        "exchange": a.exchange,
+                        "start": cs.isoformat(),
+                        "end": ce.isoformat(),
+                    },
+                    "run_after": None,
+                    "attempts": 0,
+                    "max_attempts": 3,
+                })
+
+        if args.dry_run:
+            _print({
+                "mode": "dry-run",
+                "window": [start.isoformat(), end.isoformat()],
+                "lookback_days": days,
+                "chunk_trading_days": chunk_days,
+                "chunks": [(cs.isoformat(), ce.isoformat()) for cs, ce in chunk_ranges],
+                "assets": [a.ticker for a in assets],
+                "planned_jobs": len(jobs),
+                "dedupe_keys": [j["dedupe_key"] for j in jobs],
+            })
+            print("NOTE: dry-run — no jobs enqueued, nothing persisted, no worker triggered.")
+            return 0
+
+        if not jobs:
+            print("NOTE: no confirmed+active assets matched; nothing enqueued.")
+            return 0
+
+        keys = [j["dedupe_key"] for j in jobs]
+        # Enqueue idempotently: existing chunk keys are skipped, not duplicated.
+        session.execute(
+            pg_insert(CollectionJob).values(jobs)
+            .on_conflict_do_nothing(constraint="uq_collection_jobs_dedupe_key")
+        )
+        # Give any previously-FAILED chunk another chance (fresh retry budget).
+        reset = session.execute(
+            update(CollectionJob)
+            .where(
+                CollectionJob.job_type == "backfill:market",
+                CollectionJob.status == "failed",
+                CollectionJob.dedupe_key.in_(keys),
+            )
+            .values(status="queued", attempts=0, error=None,
+                    claimed_by=None, claimed_at=None, run_after=None,
+                    updated_at=func.now())
+        )
+        session.commit()
+
+        _print({
+            "mode": "enqueued",
+            "window": [start.isoformat(), end.isoformat()],
+            "planned_jobs": len(jobs),
+            "reset_failed_jobs": reset.rowcount,
+            "dedupe_keys": keys,
+        })
+        print("NOTE: jobs enqueued. The background worker fetches + persists on its next "
+              "run; re-running this command is idempotent (ON CONFLICT DO NOTHING).")
+        return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     setup_logging()
     p = argparse.ArgumentParser(description="Phase 5 collection runner")
@@ -295,6 +402,21 @@ def main(argv: list[str] | None = None) -> int:
     cs.add_argument("--actor", default=None, help="explicit Actor ref override")
     cs.add_argument("--exchange", default=None)
     cs.set_defaults(func=collect_social)
+
+    bf = sub.add_parser(
+        "backfill-market",
+        help="enqueue historical market-price backfill jobs (enqueue-only; "
+             "--dry-run previews without touching the queue)",
+    )
+    bf.add_argument("--lookback-days", type=int, default=None,
+                   help="calendar lookback window in days (default: settings.backfill_default_days)")
+    bf.add_argument("--assets", default="all",
+                   help="'all' confirmed+active assets, or a comma list of tickers")
+    bf.add_argument("--chunk-days", type=int, default=None,
+                   help="max trading days per chunk (default: settings.backfill_chunk_trading_days)")
+    bf.add_argument("--dry-run", action="store_true",
+                    help="print the planned jobs; enqueue nothing, persist nothing")
+    bf.set_defaults(func=backfill_market)
 
     args = p.parse_args(argv)
     return args.func(args)

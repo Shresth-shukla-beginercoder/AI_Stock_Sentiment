@@ -85,6 +85,14 @@ class Settings(BaseSettings):
     provider_batch_limit: int = 120  # max bars / results fetched per call
     collection_window_days: int = 10  # lookback for news / social (CLAUDE.md)
 
+    # --- Historical market-price backfill (Phase A1) ---
+    # The backfill splits the lookback into calendar chunks whose trading-day
+    # count stays under the provider's per-call bar cap (provider_batch_limit,
+    # default 120) so no chunk is silently truncated to its most recent bars.
+    # Both knobs are defaults only; real overrides come from the CLI flags.
+    backfill_chunk_trading_days: int = 60   # max trading days per backfill chunk
+    backfill_default_days: int = 183        # ~6 months of calendar lookback
+
     # --- Sentiment engine (Phase 6) ---
     sentiment_social_weight: float = 0.4  # CLAUDE.md: social weight in combined score
     sentiment_news_weight: float = 0.6    # CLAUDE.md: news weight in combined score
