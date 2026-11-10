@@ -221,7 +221,7 @@ def collect_news(args) -> int:
         session.commit()
         _print({"result": "persisted", "provider": res.provider,
                 "inserted": res.inserted, "skipped_duplicates": res.skipped_duplicates,
-                "synthetic_timestamps": res.synthetic_timestamps})
+                "null_published_at": res.null_published_at})
     return 0
 
 
@@ -257,7 +257,7 @@ def collect_social(args) -> int:
         session.commit()
         _print({"result": "persisted", "provider": res.provider,
                 "inserted": res.inserted, "skipped_duplicates": res.skipped_duplicates,
-                "synthetic_timestamps": res.synthetic_timestamps})
+                "null_published_at": res.null_published_at})
     return 0
 
 

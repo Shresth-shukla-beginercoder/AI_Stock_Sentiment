@@ -41,11 +41,9 @@ class Settings(BaseSettings):
     api_admin_key: SecretStr | None = None
     exa_api_key: SecretStr | None = None
     tavily_api_key: SecretStr | None = None
-    # Apify credential. APIFY_API_TOKEN is the canonical name (Phase 5 spec);
-    # APIFY_API_KEY is a Phase-1 legacy alias kept so an existing local .env
-    # keeps working until renamed. apify_token() prefers the token.
+    # Apify credential. APIFY_API_TOKEN is the single canonical name (used in
+    # Render and the local .env). apify_token() returns it.
     apify_api_token: SecretStr | None = None
-    apify_api_key: SecretStr | None = None
 
     # --- Market data provider: owner-selected as "twelve_data" (capability UNVERIFIED).
     # --- The name is a config value; vendor symbol coverage/quota/ToS stay UNVERIFIED
@@ -123,45 +121,24 @@ class Settings(BaseSettings):
         "exa_api_key",
         "tavily_api_key",
         "apify_api_token",
-        "apify_api_key",
         "twelve_data_api_key",
     )
 
     def apify_token(self) -> str | None:
-        """Effective Apify credential: APIFY_API_TOKEN, else legacy APIFY_API_KEY."""
-        if self.apify_api_token:
-            return self.apify_api_token.get_secret_value()
-        if self.apify_api_key:
-            return self.apify_api_key.get_secret_value()
-        return None
+        """Effective Apify credential: APIFY_API_TOKEN (the single canonical name)."""
+        return self.apify_api_token.get_secret_value() if self.apify_api_token else None
 
     def missing_credentials(self) -> list[str]:
         """Names (upper-cased env var form) of credentials that are unset.
 
-        The two Apify names (APIFY_API_TOKEN canonical, APIFY_API_KEY alias)
-        satisfy the *same* requirement — Apify is configured when either is set
-        (see apify_token()). So we never flag the empty sibling as missing:
-          - Apify usable  -> neither Apify name is reported missing.
-          - Apify not usable (both unset) -> report a single name to set
-            (APIFY_API_KEY), not two.
+        Apify has a single credential name (APIFY_API_TOKEN); it is reported
+        missing only when it is unset (see apify_token()).
         """
-        missing = [f.upper() for f in self.CREDENTIAL_FIELDS if not getattr(self, f)]
-        if self.apify_token():
-            missing = [m for m in missing if m not in ("APIFY_API_TOKEN", "APIFY_API_KEY")]
-        else:
-            missing = [m for m in missing if m != "APIFY_API_TOKEN"]
-        return missing
+        return [f.upper() for f in self.CREDENTIAL_FIELDS if not getattr(self, f)]
 
     def configured_credentials(self) -> list[str]:
-        """Names (upper-cased env var form) of credentials that are set.
-
-        Reports the specific Apify name that is actually present (token or key),
-        so a user relying on the APIFY_API_KEY alias isn't also told the
-        token is configured.
-        """
-        configured = [f.upper() for f in self.CREDENTIAL_FIELDS if getattr(self, f)]
-        # Both Apify names set is valid; keep whichever the user provided.
-        return configured
+        """Names (upper-cased env var form) of credentials that are set."""
+        return [f.upper() for f in self.CREDENTIAL_FIELDS if getattr(self, f)]
 
 
 

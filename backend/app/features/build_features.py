@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from dataclasses import dataclass
 
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, Date
 from sqlalchemy.orm import Session
 
 from app.database.models import MarketPrice, SentimentResult, SocialPost, NewsArticle
@@ -115,11 +115,15 @@ def build_features(
         return []
 
     # Dedupe by trade_date (use the most recent provider if multiple).
-    price_by_date: dict[date, tuple[date, float, Optional[int], bool]] = {}
+    # close is Postgres Numeric -> Decimal; cast to float so the look-back
+    # indicator math (which mixes with float literals like 0.0) does not hit a
+    # Decimal/float TypeError. Missing stays None, never 0.
+    price_by_date: dict[date, tuple[date, Optional[float], Optional[int], bool]] = {}
     for pr in price_rows:
         key = pr.trade_date
         if key not in price_by_date:
-            price_by_date[key] = (pr.trade_date, pr.close, pr.volume, pr.is_demo)
+            close = float(pr.close) if pr.close is not None else None
+            price_by_date[key] = (pr.trade_date, close, pr.volume, pr.is_demo)
 
     sorted_dates = sorted(price_by_date.keys())
     prices_for_indicators = [(d, price_by_date[d][1]) for d in sorted_dates]
@@ -150,8 +154,8 @@ def build_features(
                         select(SocialPost.id).where(
                             and_(
                                 SocialPost.asset_id == asset_id,
-                                SocialPost.created_at.cast(date) >= sentiment_window_start,
-                                SocialPost.created_at.cast(date) <= trade_date,
+                                SocialPost.created_at.cast(Date) >= sentiment_window_start,
+                                SocialPost.created_at.cast(Date) <= trade_date,
                             )
                         )
                     ),
@@ -173,8 +177,8 @@ def build_features(
                         select(NewsArticle.id).where(
                             and_(
                                 NewsArticle.asset_id == asset_id,
-                                NewsArticle.created_at.cast(date) >= sentiment_window_start,
-                                NewsArticle.created_at.cast(date) <= trade_date,
+                                NewsArticle.created_at.cast(Date) >= sentiment_window_start,
+                                NewsArticle.created_at.cast(Date) <= trade_date,
                             )
                         )
                     ),
@@ -190,7 +194,7 @@ def build_features(
         social_score = None
         social_count = 0
         if social_results:
-            social_score = sum(r.score for r in social_results if r.score is not None) / max(
+            social_score = sum(float(r.score) for r in social_results if r.score is not None) / max(
                 len([r for r in social_results if r.score is not None]), 1
             )
             social_count = len(social_results)
@@ -198,7 +202,7 @@ def build_features(
         news_score = None
         news_count = 0
         if news_results:
-            news_score = sum(r.score for r in news_results if r.score is not None) / max(
+            news_score = sum(float(r.score) for r in news_results if r.score is not None) / max(
                 len([r for r in news_results if r.score is not None]), 1
             )
             news_count = len(news_results)

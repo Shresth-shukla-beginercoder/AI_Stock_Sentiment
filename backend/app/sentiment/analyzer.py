@@ -36,6 +36,15 @@ class SentimentScore:
 # Lazy-loaded pipelines (one per model)
 _pipelines: dict[str, object] = {}
 
+# The verified RoBERTa sentiment model has a 514-token context window. The
+# ``pipeline`` call does NOT truncate by default, so a long news/social body
+# tokenizes to more than 514 tokens and RoBERTa's embedding gather
+# (``torch.gather(token_type_ids, index=position_ids)`` on a 514-slot buffer)
+# raises ``index out of bounds``. Truncating to a safe content-token limit
+# before inference keeps long documents working while leaving short text — the
+# overwhelming case — byte-for-byte unchanged.
+_MAX_INFER_TOKENS = 512
+
 
 def _get_pipeline(model_id: str):
     """Lazy-load sentiment pipeline for the given model.
@@ -78,14 +87,29 @@ def analyze(text: str, model_id: str) -> Optional[SentimentScore]:
 
     try:
         pipe = _get_pipeline(model_id)
-        result = pipe(text, return_all_scores=True, top_k=None)
+        result = pipe(
+            text,
+            truncation=True,
+            max_length=_MAX_INFER_TOKENS,
+            return_all_scores=True,
+            top_k=None,
+        )
 
-        # result = [[{label: "NEGATIVE", score: 0.1}, {label: "NEUTRAL", score: 0.3}, ...]]
-        if not result or not result[0]:
+        # transformers returns the label/score sequence differently by version
+        # and input type: a list-input gives [[{label,score}, ...], ...] while a
+        # single-string input (newer transformers, e.g. 5.x) gives a flat
+        # [{label,score}, ...]. Normalize to the inner sequence of dicts so the
+        # parser works for both.
+        if not result:
+            _log.warning("empty inference result", extra={"model_id": model_id})
+            return None
+        first = result[0]
+        items = first if isinstance(first, list) else result
+        if not items:
             _log.warning("empty inference result", extra={"model_id": model_id})
             return None
 
-        scores_dict = {item["label"].lower(): item["score"] for item in result[0]}
+        scores_dict = {str(item["label"]).lower(): float(item["score"]) for item in items}
 
         # Extract probabilities (model-specific labels normalized)
         p_pos = scores_dict.get("positive", 0.0)

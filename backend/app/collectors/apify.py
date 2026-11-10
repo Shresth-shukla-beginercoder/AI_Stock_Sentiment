@@ -113,7 +113,7 @@ class ApifySocialCollector:
         if self._injected is not None:
             return self._injected
         if not self._token:
-            raise AuthError("Apify token is not configured (APIFY_API_TOKEN / APIFY_API_KEY)")
+            raise AuthError("Apify credential is not configured (APIFY_API_TOKEN)")
         timeout = self._settings.provider_timeout_seconds
         return apify_client.ApifyClient(
             token=self._token,
@@ -175,7 +175,15 @@ class ApifySocialCollector:
         )
 
     # -- run (only when verified + asset approved) -------------------------
-    def run_actor(self, ref: str, run_input: dict, *, wait: Optional[timedelta] = None) -> "apify_client._resource_clients.actor.Run":
+    def run_actor(
+        self,
+        ref: str,
+        run_input: dict,
+        *,
+        wait: Optional[timedelta] = None,
+        max_items: Optional[int] = None,
+        max_total_charge_usd: Optional[float] = None,
+    ) -> "apify_client._resource_clients.actor.Run":
         client = self._client()
         actor = client.actor(ref)
         if not actor.validate_input(run_input):
@@ -184,7 +192,18 @@ class ApifySocialCollector:
             raise InvalidResponseError(
                 f"run input failed Actor '{ref}' schema validation (UNVERIFIED schema — do not guess fields)"
             )
-        run = actor.call(run_input=run_input, wait_for_run=(wait or self._run_wait))
+        kwargs: dict = {"run_input": run_input}
+        # apify_client 3.x expresses the run wait as ``wait_duration`` (a
+        # timedelta; it is added to now() to compute the poll deadline), not
+        # the legacy ``wait_for_run``. Optional caps keep a run bounded and
+        # cost-capped (existing credits only — never a purchase/plan change).
+        wait_td = wait or self._run_wait
+        kwargs["wait_duration"] = wait_td
+        if max_items is not None:
+            kwargs["max_items"] = max_items
+        if max_total_charge_usd is not None:
+            kwargs["max_total_charge_usd"] = max_total_charge_usd
+        run = actor.call(**kwargs)
         if run is None:
             raise ProviderUnavailableError(f"Apify run did not start for '{ref}'")
         return run
