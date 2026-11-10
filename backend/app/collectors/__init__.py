@@ -30,8 +30,6 @@ from app.collectors.apify import (
     CandidateActor,
     SocialPostItem,
     CANDIDATE_ACTORS,
-    candidates_for,
-    EXCHANGE_PLATFORMS,
 )
 
 __all__ = [
@@ -43,5 +41,5 @@ __all__ = [
     "market_provider_chain", "fetch_daily_prices",
     "ExaNewsCollector", "NewsItem",
     "ApifySocialCollector", "ActorAvailability", "CandidateActor",
-    "SocialPostItem", "CANDIDATE_ACTORS", "candidates_for", "EXCHANGE_PLATFORMS",
+    "SocialPostItem", "CANDIDATE_ACTORS",
 ]
