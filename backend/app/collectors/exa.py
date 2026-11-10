@@ -138,7 +138,7 @@ class ExaNewsCollector:
                 start_published_date=start_d,
                 end_published_date=end_d,
                 contents=contents,
-                type="news",
+                category="news",
             )
 
         resp = bounded_retry(_do, settings=self._settings)
