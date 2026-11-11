@@ -302,3 +302,122 @@ def get_ranking() -> list[dict[str, Any]]:
     for i, r in enumerate(ranked, 1):
         r["rank"] = i
     return ranked
+
+
+# --- per-ticker report (W5 parity with the live report) ----------------------
+_DEMO_SR_WINDOW = 20  # mirrors settings.support_resistance_window_sessions
+
+
+def _demo_levels(ticker: str) -> dict[str, Any]:
+    """Window-extremes S/R over the demo price walk (same rule as W4)."""
+    rows = _price_series(ticker)[-_DEMO_SR_WINDOW:]
+    usable = [r for r in rows if r["low"] is not None or r["high"] is not None]
+    lows = [r["low"] for r in usable if r["low"] is not None]
+    highs = [r["high"] for r in usable if r["high"] is not None]
+    sufficient = len(usable) >= 2
+    return {
+        "support": min(lows) if lows else None,
+        "resistance": max(highs) if highs else None,
+        "method": "window_extremes: support=min(low), resistance=max(high) over the most recent "
+                  f"{_DEMO_SR_WINDOW} stored trading sessions (actual bars used: {len(rows)})",
+        "window_sessions": _DEMO_SR_WINDOW,
+        "available_sessions": len(rows),
+        "data_sufficient": sufficient,
+        "as_of": rows[-1]["trade_date"] if rows else None,
+        "basis": "deterministic synthetic price walk (demo)",
+    }
+
+
+def _demo_position(close: Any, sr: dict[str, Any]) -> str:
+    if close is None or not sr["data_sufficient"]:
+        return "unknown"
+    if close > sr["resistance"]:
+        return "above_resistance"
+    if close < sr["support"]:
+        return "below_support"
+    return "between"
+
+
+def get_ticker_report() -> dict[str, Any]:
+    """Demo per-ticker, exchange-separated report — SAME shape as the live
+    report (W5: the API and the frontend represent the same report data).
+    All values derive from the deterministic demo dataset; nothing is live.
+    """
+    by_exchange: dict[str, list[dict[str, Any]]] = {}
+    for a in ASSETS:
+        t = a["ticker"]
+        prices = _price_series(t)
+        last_price = prices[-1] if prices else None
+        sent = _demo_sentiment(t)
+        preds = _demo_predictions(t)
+        pred = preds[0] if preds else None
+        pred_ret = pred["predicted_return"] if pred else None
+        if pred_ret is None:
+            direction = "none"
+        elif pred_ret > 0:
+            direction = "up"
+        elif pred_ret < 0:
+            direction = "down"
+        else:
+            direction = "flat"
+        sr = _demo_levels(t)
+        posts, news = len(_demo_posts(t)), len(_demo_news(t))
+        close = last_price["close"] if last_price else None
+        row = {
+            "ticker": t,
+            "name": a["name"],
+            "current_price": (
+                {"close": last_price["close"], "provider": last_price["provider"],
+                 "trade_date": last_price["trade_date"]}
+                if last_price else None
+            ),
+            "sentiment": {"score": sent["score"], "signal": sent["signal"], "state": sent["state"]},
+            "direction": direction,
+            "prediction": {
+                "model_version": pred["model_version"],
+                "target_date": pred["target_date"],
+                "predicted_return": pred["predicted_return"],
+                "predicted_price": pred["predicted_price"],
+                "actual_close": pred["actual_close"],
+                "experimental": pred["experimental"],
+                "direction": direction,
+            } if pred else None,
+            "support_resistance": sr,
+            "position": _demo_position(close, sr),
+            "mentions": {"social_posts": posts, "news_articles": news, "total": posts + news},
+            "is_demo": True,
+        }
+        by_exchange.setdefault(a["exchange"], []).append(row)
+
+    exchanges = []
+    for ex in sorted(by_exchange):
+        rows = sorted(
+            by_exchange[ex],
+            key=lambda r: (
+                -r["mentions"]["total"],
+                r["sentiment"]["score"] is None,
+                -(r["sentiment"]["score"] or 0.0),
+                r["ticker"],
+            ),
+        )
+        for i, r in enumerate(rows, 1):
+            r["rank"] = i
+        exchanges.append({"exchange": ex, "timezone": "UTC", "tickers": rows})
+
+    ranking = [r for ex in exchanges for r in ex["tickers"]]
+    return {
+        "as_of": _DEMO_AS_OF.isoformat(),
+        "exchanges": exchanges,
+        "ranking": ranking,
+        "meta": {
+            "generated_at": _DEMO_AS_OF.isoformat(),
+            "ranking_rule": "total mentions desc, then sentiment score desc (None last), then ticker asc — within each exchange",
+            "sentiment_thresholds": {
+                "bullish": 0.15, "bearish": -0.15, "min_items": 5, "window_days": 10,
+            },
+            "support_resistance_window_sessions": _DEMO_SR_WINDOW,
+            "direction_rule": "sign of the latest stored prediction's predicted_return",
+            "missing_policy": "null = not yet known / no data stored; 0 = a real count of zero",
+            "note": "Synthetic demo report — not real market data.",
+        },
+    }

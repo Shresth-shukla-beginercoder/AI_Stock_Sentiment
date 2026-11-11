@@ -7,13 +7,13 @@ Preserves data provenance (is_demo, timestamps). Never generates fabricated resu
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from typing import Optional
 import logging
 
 from sqlalchemy.orm import Session
 
-from app.database.models import Asset, CollectionJob, SentimentResult, Prediction
+from app.database.models import Asset
 from app.collectors.chain import market_provider_chain, fetch_daily_prices
 from app.collectors.exa import ExaNewsCollector
 from app.collectors.apify import ApifySocialCollector
@@ -31,6 +31,35 @@ from app.core.logging import get_logger
 # persist_sentiment_result will be imported inside stage_score_sentiment
 
 _log = get_logger("services.orchestrate")
+
+
+def _git_commit() -> str:
+    """Real git HEAD SHA when this runs inside a checkout; 'no_git_repo' otherwise.
+
+    Never invents a commit; the registry stores exactly what the environment
+    reports so a model row can be reproduced against a real source state.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        sha = out.stdout.strip()
+        return sha if out.returncode == 0 and sha else "no_git_repo"
+    except Exception:
+        return "no_git_repo"
+
+
+def _ml_seed() -> int:
+    from app.core.config import get_settings
+    return get_settings().ml_random_seed
+
+
+def _ml_holdout_ratio() -> float:
+    from app.core.config import get_settings
+    return get_settings().ml_holdout_ratio
 
 
 class PipelineStage:
@@ -130,7 +159,15 @@ class EndToEndPipeline:
         self,
         asset: Asset,
     ) -> PipelineStage:
-        """Collect social posts (Phase 5)."""
+        """Collect social posts via the exchange's CONFIGURED Apify Actors (W1).
+
+        Mirrors the worker's collect:social path: actor refs come from
+        settings (``apify_actor_*``), run inputs are built from each actor's
+        own example/schema (never guessed), runs are bounded (wait / item cap
+        / charge cap from settings), and normalized posts are persisted with
+        ON CONFLICT DO NOTHING dedupe. Unconfigured platforms are reported,
+        never filled with invented actors.
+        """
         try:
             if not asset:
                 return PipelineStage(
@@ -139,32 +176,68 @@ class EndToEndPipeline:
                     error="Asset missing",
                 )
 
-            # Verify actor is available (read-only verification in Phase 5).
-            collector = ApifySocialCollector()
-            verified = collector.verify_actor()
+            from app.core.config import get_settings
+            from app.collectors.exceptions import TransientError, RateLimitError
+            from app.collectors.apify import resolve_exchange_actors
 
-            if not verified:
-                _log.info(
-                    "collect_social: actor not verified",
-                    extra={"ticker": asset.ticker},
-                )
-                return PipelineStage(
-                    success=True,
-                    stage_name="collect_social",
-                    records_processed=0,
-                    data={"reason": "actor_not_verified"},
-                )
+            settings = get_settings()
+            collector = ApifySocialCollector(
+                settings=settings,
+                run_wait_seconds=settings.apify_run_wait_seconds,
+            )
+            records = resolve_exchange_actors(settings, asset.exchange, collector, asset.ticker)
 
-            # In Phase 5, actual runs are not approved. This stage verifies availability.
+            fetched = 0
+            inserted = 0
+            skipped = 0
+            for rec in records:
+                if not rec["configured"] or not rec["available"] or rec["run_input"] is None:
+                    continue
+                try:
+                    run = collector.run_actor(
+                        rec["actor"],
+                        rec["run_input"],
+                        wait=None,
+                        max_items=settings.apify_run_max_items,
+                        max_total_charge_usd=settings.apify_run_max_charge_usd,
+                    )
+                    raw = collector.fetch_items(run)
+                    items = collector.to_social_items(raw, platform=rec["platform"])
+                    if items:
+                        res = persist_social(self.session, asset.id, items)
+                        inserted += res.inserted
+                        skipped += res.skipped_duplicates
+                        fetched += len(items)
+                except (TransientError, RateLimitError) as e:
+                    rec["note"] = f"run failed ({type(e).__name__}): {e}"
+                except Exception as e:
+                    rec["note"] = f"run failed ({type(e).__name__}): {e}"
+
+            if inserted:
+                self.session.commit()
+
+            # Honest short-circuit reason when nothing was persisted:
+            # - no configured+available actor could run -> "actor_not_verified"
+            # - available actor(s) ran but returned 0 usable posts -> "empty_result"
+            # (both are success: the stage did its work and fabricated nothing.)
+            data: dict = {"fetched": fetched, "inserted": inserted,
+                          "skipped_duplicates": skipped, "actors": records}
+            if fetched == 0:
+                if any(r.get("available") and r.get("run_input") is not None for r in records):
+                    data["reason"] = "empty_result"
+                else:
+                    data["reason"] = "actor_not_verified"
+
             _log.info(
-                "collect_social: actor verified but runs not approved in Phase 5",
-                extra={"ticker": asset.ticker},
+                "collect_social: success",
+                extra={"ticker": asset.ticker, "fetched": fetched, "inserted": inserted,
+                       "actors": len(records)},
             )
             return PipelineStage(
                 success=True,
                 stage_name="collect_social",
-                records_processed=0,
-                data={"reason": "runs_not_approved_phase_5"},
+                records_processed=inserted,
+                data=data,
             )
 
         except Exception as e:
@@ -178,8 +251,14 @@ class EndToEndPipeline:
     def stage_collect_news(
         self,
         asset: Asset,
+        end_date: Optional[date] = None,
     ) -> PipelineStage:
-        """Collect news articles (Phase 5)."""
+        """Collect news articles via Exa (Phase 5), relevance-filtered (W3).
+
+        The query includes the company name + ticker, the search is bounded to
+        the configured lookback window, and items that do not mention the
+        asset are dropped before persistence (``filter_asset_relevant``).
+        """
         try:
             if not asset or not asset.ticker:
                 return PipelineStage(
@@ -188,31 +267,73 @@ class EndToEndPipeline:
                     error="Asset or ticker missing",
                 )
 
-            collector = ExaNewsCollector()
-            results = collector.search(asset.ticker, num_results=10)
+            from app.core.config import get_settings
 
-            if not results:
+            settings = get_settings()
+            collector = ExaNewsCollector(settings=settings)
+            query = f"{asset.name} {asset.ticker} news"
+            items = collector.search(
+                query,
+                end=end_date,
+                company_name=asset.name,
+            )
+
+            # W3: keep only articles that actually reference this asset.
+            from app.collectors.relevance import filter_asset_relevant
+
+            kept, rel = filter_asset_relevant(
+                items,
+                name=asset.name,
+                ticker=asset.ticker,
+                provider_ticker=asset.provider_ticker,
+            )
+
+            if not kept:
                 _log.info(
-                    "collect_news: no results",
-                    extra={"ticker": asset.ticker, "reason": "empty_result"},
+                    "collect_news: nothing to persist",
+                    extra={"ticker": asset.ticker, "fetched": len(items),
+                           "dropped_irrelevant": rel.irrelevant_dropped,
+                           "reason": "empty_result"},
                 )
                 return PipelineStage(
                     success=True,
                     stage_name="collect_news",
                     records_processed=0,
-                    data={"reason": "empty_result"},
+                    data={
+                        "reason": "empty_result",
+                        "fetched": len(items),
+                        "relevance": {
+                            "relevant": rel.relevant,
+                            "ambiguous_kept": rel.ambiguous,
+                            "irrelevant_dropped": rel.irrelevant_dropped,
+                            "no_ticker_kept": rel.no_ticker_kept,
+                            "total_in": rel.total_in,
+                        },
+                    },
                 )
 
-            persist_news(self.session, asset.id, results)
+            res = persist_news(self.session, asset.id, kept)
+            self.session.commit()
 
             _log.info(
                 "collect_news: success",
-                extra={"ticker": asset.ticker, "count": len(results)},
+                extra={"ticker": asset.ticker, "fetched": len(items),
+                       "inserted": res.inserted},
             )
             return PipelineStage(
                 success=True,
                 stage_name="collect_news",
-                records_processed=len(results),
+                records_processed=res.inserted,
+                data={"fetched": len(items), "inserted": res.inserted,
+                      "skipped_duplicates": res.skipped_duplicates,
+                      "null_published_at": res.null_published_at,
+                      "relevance": {
+                          "relevant": rel.relevant,
+                          "ambiguous_kept": rel.ambiguous,
+                          "irrelevant_dropped": rel.irrelevant_dropped,
+                          "no_ticker_kept": rel.no_ticker_kept,
+                          "total_in": rel.total_in,
+                      }},
             )
 
         except Exception as e:
@@ -232,7 +353,14 @@ class EndToEndPipeline:
         trade_date: date,
         lookback_days: int = 10,
     ) -> PipelineStage:
-        """Score sentiment for asset on a given date (Phase 6)."""
+        """Score sentiment for items in the rolling window (Phase 6).
+
+        Real pipeline: preprocess → language routing → model select →
+        ``analyze(text, model_id)`` → persist with ON CONFLICT DO NOTHING
+        (idempotent per item+model). Items with no verified model for their
+        language are counted as ``skipped_unroutable`` — never forced
+        through an English model.
+        """
         try:
             if not asset or not asset.id:
                 return PipelineStage(
@@ -243,23 +371,27 @@ class EndToEndPipeline:
 
             window_start = trade_date - timedelta(days=lookback_days)
 
-            # Fetch social posts
-            from app.database.models import SocialPost
+            from sqlalchemy import func, select
+            from app.database.models import SocialPost, NewsArticle
 
-            social_posts = self.session.query(SocialPost).filter(
-                SocialPost.asset_id == asset.id,
-                SocialPost.created_at >= datetime.combine(window_start, datetime.min.time()),
-                SocialPost.created_at <= datetime.combine(trade_date, datetime.max.time()),
-            ).all()
+            ts_social = func.coalesce(SocialPost.published_at, SocialPost.created_at)
+            ts_news = func.coalesce(NewsArticle.published_at, NewsArticle.created_at)
 
-            # Fetch news articles
-            from app.database.models import NewsArticle
+            social_posts = self.session.execute(
+                select(SocialPost).where(
+                    SocialPost.asset_id == asset.id,
+                    func.date(ts_social) >= window_start,
+                    func.date(ts_social) <= trade_date,
+                )
+            ).scalars().all()
 
-            news_articles = self.session.query(NewsArticle).filter(
-                NewsArticle.asset_id == asset.id,
-                NewsArticle.created_at >= datetime.combine(window_start, datetime.min.time()),
-                NewsArticle.created_at <= datetime.combine(trade_date, datetime.max.time()),
-            ).all()
+            news_articles = self.session.execute(
+                select(NewsArticle).where(
+                    NewsArticle.asset_id == asset.id,
+                    func.date(ts_news) >= window_start,
+                    func.date(ts_news) <= trade_date,
+                )
+            ).scalars().all()
 
             total_items = len(social_posts) + len(news_articles)
             if total_items == 0:
@@ -274,52 +406,72 @@ class EndToEndPipeline:
                     data={"reason": "no_items"},
                 )
 
-            # Analyze and persist sentiment (Phase 6 pipeline)
-            # Late binding to avoid transformers circular import
-            from app.sentiment.analyzer import analyze
-            from app.sentiment.persist import persist_sentiment_result
+            # Real Phase 6 pipeline (late binding avoids the transformers
+            # import at module load).
+            from app.sentiment import (
+                preprocess_for_sentiment,
+                select_model,
+                analyze,
+                persist_sentiment_result,
+            )
 
-            sentiment_items = []
+            scored = 0
+            skipped_unroutable = 0
+            duplicates = 0
+
+            def _score_one(persist_type: str, route_type: str, item_id: int,
+                           text: Optional[str]) -> None:
+                nonlocal scored, skipped_unroutable, duplicates
+                clean = preprocess_for_sentiment(text)
+                if not clean:
+                    skipped_unroutable += 1
+                    return
+                model_id = select_model(clean, route_type)
+                if model_id is None:
+                    # No verified model routes this language (e.g. CJK) —
+                    # honestly skip rather than force an English model.
+                    skipped_unroutable += 1
+                    return
+                result = analyze(clean, model_id)
+                if result is None:
+                    skipped_unroutable += 1
+                    return
+                res = persist_sentiment_result(
+                    self.session,
+                    item_type=persist_type,
+                    item_id=item_id,
+                    model_name=result.model_id,
+                    label=result.label,
+                    score=result.score,
+                    p_pos=result.p_pos,
+                    p_neu=result.p_neu,
+                    p_neg=result.p_neg,
+                )
+                if res.inserted:
+                    scored += 1
+                else:
+                    duplicates += 1
+
             for post in social_posts:
-                result = analyze(post.content, language="en")
-                if result:
-                    persist_sentiment_result(
-                        self.session,
-                        item_type="social_post",
-                        item_id=post.id,
-                        model_name="distilbert-base-uncased-finetuned-sst-2-english",
-                        label=result.get("label", "neutral"),
-                        score=result.get("score", 0.0),
-                        p_pos=result.get("p_pos", 0.0),
-                        p_neu=result.get("p_neu", 0.0),
-                        p_neg=result.get("p_neg", 0.0),
-                    )
-                    sentiment_items.append(("social", result))
-
+                _score_one("social_post", "social", post.id, post.content)
             for article in news_articles:
-                result = analyze(article.content, language="en")
-                if result:
-                    persist_sentiment_result(
-                        self.session,
-                        item_type="news_article",
-                        item_id=article.id,
-                        model_name="distilbert-base-uncased-finetuned-sst-2-english",
-                        label=result.get("label", "neutral"),
-                        score=result.get("score", 0.0),
-                        p_pos=result.get("p_pos", 0.0),
-                        p_neu=result.get("p_neu", 0.0),
-                        p_neg=result.get("p_neg", 0.0),
-                    )
-                    sentiment_items.append(("news", result))
+                _score_one("news_article", "news", article.id, article.body or article.title)
 
+            if scored or duplicates:
+                self.session.commit()
             _log.info(
                 "score_sentiment: success",
-                extra={"ticker": asset.ticker, "date": trade_date, "count": len(sentiment_items)},
+                extra={"ticker": asset.ticker, "date": trade_date,
+                       "scored": scored, "duplicates": duplicates,
+                       "skipped_unroutable": skipped_unroutable},
             )
             return PipelineStage(
                 success=True,
                 stage_name="score_sentiment",
-                records_processed=len(sentiment_items),
+                records_processed=scored,
+                data={"scored": scored, "duplicates": duplicates,
+                      "skipped_unroutable": skipped_unroutable,
+                      "total_items": total_items},
             )
 
         except Exception as e:
@@ -416,7 +568,9 @@ class EndToEndPipeline:
             registry_entry = train_and_evaluate(
                 rows,
                 model_version=model_version,
-                git_commit="no_git_repo",  # Placeholder in dev
+                git_commit=_git_commit(),  # real SHA when in a repo, else "no_git_repo"
+                seed=_ml_seed(),
+                holdout_ratio=_ml_holdout_ratio(),
             )
 
             if not registry_entry:
@@ -483,7 +637,15 @@ class EndToEndPipeline:
         model_version: str,
         rows: list,
     ) -> PipelineStage:
-        """Generate predictions from trained model (Phase 8+)."""
+        """Generate the next-TRADING-session prediction (W6).
+
+        Uses ``predict_next_session``: the target is the row's actual next
+        observed trading bar (never a calendar +1), and the predicted price is
+        computed from that row's CLOSE (``close * (1 + return)``), never from
+        a target-return value. Only one prediction is persisted — the one for
+        the not-yet-traded next session — so a return value can never be
+        mistaken for a price.
+        """
         try:
             if not rows:
                 return PipelineStage(
@@ -492,87 +654,65 @@ class EndToEndPipeline:
                     error="No rows",
                 )
 
-            # Extract features and targets
-            from app.models.trainer import WalkForwardTrainer
+            from app.models.trainer import predict_next_session
+            from app.features.make_target import predicted_price as _predicted_price
 
-            trainer = WalkForwardTrainer()
-            features, targets = trainer._extract_xy(rows)
-
-            if not features:
+            pred = predict_next_session(rows, seed=_ml_seed())
+            if pred is None:
+                _log.info(
+                    "generate_predictions: not enough history for an honest prediction",
+                    extra={"ticker": asset.ticker},
+                )
                 return PipelineStage(
-                    success=False,
+                    success=True,
                     stage_name="generate_predictions",
-                    error="No features extracted",
+                    records_processed=0,
+                    data={"reason": "insufficient_history"},
+                )
+            if pred["target_date"] is None:
+                # No next observed trading bar exists — there is nothing to
+                # predict for; report it instead of inventing a date.
+                return PipelineStage(
+                    success=True,
+                    stage_name="generate_predictions",
+                    records_processed=0,
+                    data={"reason": "no_next_trading_session"},
                 )
 
-            # For now, generate simple predictions (in Phase 9+ this would use
-            # a persisted model or retrain). For demo purposes, use the trainer's
-            # last fold's model.
-            X = trainer._impute_features(features)
-            y = targets
+            # Self-check: predicted price must be the close basis, not a return.
+            basis_close = pred["basis_close"]
+            assert pred["predicted_price"] is None or (
+                basis_close is not None
+                and pred["predicted_price"] == _predicted_price(basis_close, pred["predicted_return"])
+            ), "predicted price is not derived from the close basis"
 
-            all_preds = []
-            for train_idx, test_idx in trainer.tscv.split(X):
-                if len(test_idx) == 0:
-                    continue
-
-                X_train = [X[i] for i in train_idx]
-                y_train = [y[i] for i in train_idx]
-                X_test = [X[i] for i in test_idx]
-
-                from sklearn.preprocessing import StandardScaler
-                from sklearn.linear_model import Ridge
-
-                scaler = StandardScaler()
-                X_train_scaled = scaler.fit_transform(X_train)
-                X_test_scaled = scaler.transform(X_test)
-
-                model = Ridge(alpha=1.0)
-                model.fit(X_train_scaled, y_train)
-                preds = model.predict(X_test_scaled)
-                all_preds.extend(preds)
-
-            # Build prediction records (target_date = trade_date + 1)
-            predictions_data = []
-            for i, row in enumerate(rows):
-                if i < len(all_preds):
-                    predicted_return = float(all_preds[i])
-                    from app.features.make_target import predicted_price
-
-                    close = row.target_return  # Placeholder; in real use, fetch from last price
-                    if close:
-                        pred_price = predicted_price(close, predicted_return)
-                    else:
-                        pred_price = None
-
-                    predictions_data.append({
-                        "target_date": row.trade_date + timedelta(days=1),
-                        "predicted_return": predicted_return,
-                        "predicted_price": pred_price,
-                        "actual_close": None,  # To be backfilled later
-                        "experimental": row.sentiment_experimental,
-                    })
-
-            # Persist predictions
-            persist_predictions(
+            n = persist_predictions(
                 self.session,
                 asset.id,
                 model_version,
-                predictions_data,
+                [{
+                    "target_date": pred["target_date"],
+                    "predicted_return": pred["predicted_return"],
+                    "predicted_price": pred["predicted_price"],
+                    "actual_close": None,  # backfilled by backfill_actual_closes
+                    "experimental": pred["experimental"],
+                }],
             )
 
             _log.info(
                 "generate_predictions: success",
-                extra={
-                    "ticker": asset.ticker,
-                    "model_version": model_version,
-                    "count": len(predictions_data),
-                },
+                extra={"ticker": asset.ticker, "model_version": model_version,
+                       "target_date": pred["target_date"].isoformat(),
+                       "experimental": pred["experimental"]},
             )
             return PipelineStage(
                 success=True,
                 stage_name="generate_predictions",
-                records_processed=len(predictions_data),
+                records_processed=n,
+                data={"target_date": pred["target_date"].isoformat(),
+                      "predicted_return": pred["predicted_return"],
+                      "predicted_price": pred["predicted_price"],
+                      "experimental": pred["experimental"]},
             )
 
         except Exception as e:
@@ -611,7 +751,7 @@ class EndToEndPipeline:
             results["summary"] = "Pipeline halted: market price collection failed"
             return results
 
-        # Stage 2: Collect social posts (verification only in Phase 5)
+        # Stage 2: Collect social posts (config-driven Apify actors, W1)
         stage2 = self.stage_collect_social(asset)
         results["stages"].append(stage2)
 

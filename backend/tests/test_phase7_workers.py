@@ -592,17 +592,24 @@ def test_dispatch_collect_market(mock_resolve, mock_persist, mock_chain):
     assert mock_persist.called
 
 
-def test_dispatch_unsupported_train_job():
-    """Dispatcher raises UnsupportedJobError for 'train' job."""
-    from app.workers.exceptions import UnsupportedJobError
+def test_dispatch_train_job_routes_to_train_handler():
+    """Dispatcher routes 'train' to the real train handler (W6).
 
-    job = CollectionJob(dedupe_key="test:train", job_type="train", status="running")
+    Supersedes the old Phase-7 expectation that 'train' raised
+    UnsupportedJobError('handler_not_implemented_yet'): W6 implemented a real
+    per-ticker train handler (walk-forward + OOS holdout + next-trading-session
+    prediction). The unsupported path is still covered for genuinely unknown
+    job types (see test_dispatch_unknown_job_type_raises).
+    """
+    from unittest.mock import MagicMock, patch
 
-    with pytest.raises(UnsupportedJobError) as exc_info:
-        dispatch_job(Mock(), job)
+    with patch("app.workers.dispatch.HANDLERS") as mock_handlers:
+        mock_handlers.get.return_value = MagicMock(return_value={"trained": [], "results": []})
+        job = CollectionJob(dedupe_key="test:train", job_type="train", status="running")
+        result = dispatch_job(Mock(), job)
 
-    assert exc_info.value.job_type == "train"
-    assert exc_info.value.reason == "handler_not_implemented_yet"
+    assert result == {"trained": [], "results": []}
+    mock_handlers.get.assert_called_once_with("train")
 
 
 def test_dispatch_unknown_job_type_raises():

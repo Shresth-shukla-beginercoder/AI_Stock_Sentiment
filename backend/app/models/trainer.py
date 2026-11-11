@@ -24,6 +24,29 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from app.features.build_features import FeatureRow
 
 
+def _feature_dict(row: FeatureRow) -> dict[str, Any]:
+    """Feature vector for one row (independent of whether its target is known).
+
+    W6: the prediction target row's NEXT session has no realized target yet,
+    so its features must be extractable without one — scoring that row with
+    its target-gate skipped is exactly what ``predict_next_session`` needs.
+    """
+    return {
+        "return_1d": row.return_1d,
+        "return_5d": row.return_5d,
+        "return_10d": row.return_10d,
+        "ma_5d": row.ma_5d,
+        "ma_10d": row.ma_10d,
+        "ma_20d": row.ma_20d,
+        "volatility_10d": row.volatility_10d,
+        "rsi_14": row.rsi_14,
+        "volume_ma": row.volume_ma,
+        "volume_ratio": row.volume_ratio,
+        "sentiment_social_score": row.sentiment_social_score,
+        "sentiment_news_score": row.sentiment_news_score,
+    }
+
+
 @dataclass
 class ModelMetrics:
     """Evaluation metrics for one fold or the full model."""
@@ -112,6 +135,8 @@ class WalkForwardTrainer:
         n_splits: int = 5,
         gap: int = 1,
         regularization: float = 1.0,
+        random_state: int = 42,
+        holdout_ratio: float = 0.0,
     ):
         """Initialize trainer.
 
@@ -119,10 +144,18 @@ class WalkForwardTrainer:
             n_splits: Number of expanding folds.
             gap: Gap between training and test fold (default 1 day).
             regularization: Ridge regression alpha (default 1.0).
+            random_state: Fixed seed (W6/W7) — passed to Ridge so repeated
+                runs are deterministic.
+            holdout_ratio: W6 — strict chronological out-of-sample holdout,
+                split OFF the END of the series after walk-forward CV. The
+                CV folds never see it, so its metrics are a genuine
+                out-of-sample estimate. 0.0 disables the holdout.
         """
         self.n_splits = n_splits
         self.gap = gap
         self.regularization = regularization
+        self.random_state = random_state
+        self.holdout_ratio = holdout_ratio
         self.tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
 
     def _extract_xy(
@@ -142,21 +175,7 @@ class WalkForwardTrainer:
             if row.target_return is None:
                 continue
 
-            feat_dict = {
-                "return_1d": row.return_1d,
-                "return_5d": row.return_5d,
-                "return_10d": row.return_10d,
-                "ma_5d": row.ma_5d,
-                "ma_10d": row.ma_10d,
-                "ma_20d": row.ma_20d,
-                "volatility_10d": row.volatility_10d,
-                "rsi_14": row.rsi_14,
-                "volume_ma": row.volume_ma,
-                "volume_ratio": row.volume_ratio,
-                "sentiment_social_score": row.sentiment_social_score,
-                "sentiment_news_score": row.sentiment_news_score,
-            }
-            features.append(feat_dict)
+            features.append(_feature_dict(row))
             targets.append(row.target_return)
 
         return features, targets
@@ -188,6 +207,11 @@ class WalkForwardTrainer:
     ) -> dict[str, Any]:
         """Run walk-forward training and evaluation.
 
+        With ``holdout_ratio > 0`` the last chronological chunk is reserved as a
+        strict out-of-sample set (walk-forward CV never sees it). The overall
+        CV metrics stay as before; the OOS metrics are the honest number to
+        quote.
+
         Returns:
             Dict with keys:
               - fold_metrics: list of (train_metrics, test_metrics) per fold
@@ -195,10 +219,31 @@ class WalkForwardTrainer:
               - baseline_metrics: baseline comparison metrics
               - n_test: total test samples across all folds
               - experimental: True if insufficient data (< 3 test samples)
+              - oos_metrics / oos_baselines / oos_n: out-of-sample holdout
+                (None when no holdout configured or too little data)
+              - beats_nochange_baseline: OOS MAE strictly below the
+                no-change baseline MAE (None when no OOS evaluation)
         """
         features, targets = self._extract_xy(rows)
 
-        if len(targets) < 5:
+        # W6: reserve a strict chronological holdout before any CV.
+        holdout_rows = []
+        cv_rows = rows
+        oos_metrics = None
+        oos_baselines = None
+        oos_n = 0
+        beats_baseline: Optional[bool] = None
+        if self.holdout_ratio and len(rows) >= 10:
+            n_holdout = int(len(rows) * self.holdout_ratio)
+            # CV needs at least n_splits+2 rows; cap the holdout accordingly.
+            n_holdout = min(n_holdout, len(rows) - (self.n_splits + 2))
+            if n_holdout >= 2:
+                holdout_rows = rows[len(rows) - n_holdout:]
+                cv_rows = rows[: len(rows) - n_holdout]
+
+        cv_features, cv_targets = self._extract_xy(cv_rows)
+
+        if len(cv_targets) < 5:
             # Too little data.
             return {
                 "fold_metrics": [],
@@ -207,10 +252,14 @@ class WalkForwardTrainer:
                 "n_test": 0,
                 "experimental": True,
                 "reason": "insufficient data",
+                "oos_metrics": None,
+                "oos_baselines": None,
+                "oos_n": 0,
+                "beats_nochange_baseline": None,
             }
 
-        X = self._impute_features(features)
-        y = targets
+        X = self._impute_features(cv_features)
+        y = cv_targets
 
         # Walk-forward CV: expanding folds.
         all_test_preds = []
@@ -232,8 +281,8 @@ class WalkForwardTrainer:
             X_train_scaled = scaler.fit_transform(X_train)
             X_test_scaled = scaler.transform(X_test)
 
-            # Train Ridge regression on training fold.
-            model = Ridge(alpha=self.regularization)
+            # Train Ridge regression on training fold (deterministic seed).
+            model = Ridge(alpha=self.regularization, random_state=self.random_state)
             model.fit(X_train_scaled, y_train)
 
             # Predict on test fold.
@@ -256,13 +305,98 @@ class WalkForwardTrainer:
         n_test = len(all_test_targets)
         experimental = n_test < 3  # Mark as experimental if very few test samples.
 
+        # W6: strict out-of-sample evaluation on the reserved holdout.
+        if holdout_rows:
+            h_features, h_targets = self._extract_xy(holdout_rows)
+            if h_targets:
+                H = self._impute_features(h_features)
+                # Fit on the CV part (never on the holdout): scaler + Ridge.
+                scaler = StandardScaler()
+                X_scaled = scaler.fit_transform(X)
+                model = Ridge(alpha=self.regularization, random_state=self.random_state)
+                model.fit(X_scaled, y)
+                h_scaled = scaler.transform(H)
+                h_pred = [float(p) for p in model.predict(h_scaled)]
+                oos_n = len(h_targets)
+                oos_metrics = compute_metrics(h_targets, h_pred)
+                oos_baselines = compute_baselines(h_targets)
+                beats_baseline = oos_metrics.mae < oos_baselines.nochange_mae
+
         return {
             "fold_metrics": fold_metrics,
             "overall_metrics": overall_metrics,
             "baseline_metrics": baseline_metrics,
             "n_test": n_test,
             "experimental": experimental,
+            "oos_metrics": oos_metrics,
+            "oos_baselines": oos_baselines,
+            "oos_n": oos_n,
+            "beats_nochange_baseline": beats_baseline,
         }
+
+
+def predict_next_session(
+    rows: list[FeatureRow],
+    *,
+    seed: int = 42,
+    regularization: float = 1.0,
+) -> Optional[dict[str, Any]]:
+    """Predict the next TRADING session's return for the latest row.
+
+    W6: the prediction is for the row's ``next_trade_date`` (the next observed
+    trading bar in the stored series — never a calendar-day +1 guess) and the
+    predicted price is computed from that row's actual CLOSE
+    (``last_close * (1 + predicted_return)``), never from a target-return
+    value. The model is fit on every earlier row; the last row (which has no
+    realized target) is the prediction target.
+
+    Returns None when there is not enough history to fit anything honest.
+    """
+    from app.features.make_target import predicted_price as _predicted_price
+
+    usable = [r for r in rows if r.target_return is not None]
+    last = rows[-1] if rows else None
+    if last is None or len(usable) < 10:
+        return None
+    if last.target_return is not None:
+        # Every row has a realized target: the next session is not yet observed,
+        # so predict it from the full fit (still honest — no target is peeked
+        # at because the last row's target is the one being predicted).
+        fit_rows = rows
+    else:
+        fit_rows = rows[:-1]
+    if len([r for r in fit_rows if r.target_return is not None]) < 10:
+        return None
+
+    features, targets = WalkForwardTrainer(random_state=seed)._extract_xy(fit_rows)
+    # _extract_xy drops rows without a realized target; features/targets stay aligned.
+    if len(features) < 10 or not targets:
+        return None
+    X = WalkForwardTrainer()._impute_features(features)
+    y = targets
+
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.linear_model import Ridge
+
+    scaler = StandardScaler()
+    Xs = scaler.fit_transform(X)
+    model = Ridge(alpha=regularization, random_state=seed)
+    model.fit(Xs, y)
+
+    last_feats = [_feature_dict(last)]
+    last_X = WalkForwardTrainer()._impute_features(last_feats)
+    pred_return = float(model.predict(scaler.transform(last_X))[0])
+    pred_price = _predicted_price(last.close, pred_return)
+    experimental = bool(last.sentiment_experimental)
+
+    return {
+        "target_date": last.next_trade_date,   # next TRADING session (None -> caller must skip)
+        "predicted_return": pred_return,
+        "predicted_price": pred_price,
+        "basis_close": last.close,             # the price basis (a close, not a return)
+        "made_from_trade_date": last.trade_date,
+        "experimental": experimental,
+    }
 
 
 def train_and_evaluate(
@@ -270,23 +404,37 @@ def train_and_evaluate(
     *,
     model_version: str = "v0.1",
     git_commit: Optional[str] = None,
+    seed: int = 42,
+    holdout_ratio: float = 0.2,
 ) -> dict[str, Any]:
     """Train a model and return evaluation results ready for registry persistence.
+
+    W6/W7: ``seed`` and ``holdout_ratio`` are now explicit (they come from
+    ``settings.ml_random_seed`` / ``settings.ml_holdout_ratio`` at the call
+    site). The registry entry reports the out-of-sample holdout numbers
+    separately from the CV numbers, plus an honest beats-baseline flag.
 
     Args:
         rows: Feature rows (must include targets).
         model_version: Model version string for registry.
         git_commit: Git commit SHA (or None if not a git repo).
+        seed: Fixed random seed (ML determinism).
+        holdout_ratio: Fraction of the series tail reserved for OOS.
 
     Returns:
         Dict with registry entry fields + training metadata.
     """
-    trainer = WalkForwardTrainer(n_splits=5, gap=1, regularization=1.0)
+    trainer = WalkForwardTrainer(
+        n_splits=5, gap=1, regularization=1.0,
+        random_state=seed, holdout_ratio=holdout_ratio,
+    )
     results = trainer.train(rows)
 
     # Build registry entry.
     overall_metrics = results["overall_metrics"]
     baseline_metrics = results["baseline_metrics"]
+    oos_metrics = results.get("oos_metrics")
+    oos_baselines = results.get("oos_baselines")
 
     registry_entry = {
         "model_version": model_version,
@@ -298,11 +446,29 @@ def train_and_evaluate(
         "baseline_nochange_dir_acc": baseline_metrics.nochange_dir_acc if baseline_metrics else None,
         "baseline_alwaysup_dir_acc": baseline_metrics.alwaysup_dir_acc if baseline_metrics else None,
         "n_test": results["n_test"],
+        "oos_mae": oos_metrics.mae if oos_metrics else None,
+        "oos_rmse": oos_metrics.rmse if oos_metrics else None,
+        "oos_directional_accuracy": oos_metrics.directional_accuracy if oos_metrics else None,
+        "oos_nochange_mae": oos_baselines.nochange_mae if oos_baselines else None,
+        "oos_n": results.get("oos_n", 0),
+        "beats_nochange_baseline": results.get("beats_nochange_baseline"),
         "params": {
             "algorithm": "ridge",
             "regularization": 1.0,
             "n_splits": 5,
             "gap": 1,
+            "random_state": seed,
+            "holdout_ratio": holdout_ratio,
+            "oos_holdout": {
+                # Persisted with the registry row so the honest out-of-sample
+                # numbers survive into model_evaluations.params.
+                "mae": oos_metrics.mae if oos_metrics else None,
+                "rmse": oos_metrics.rmse if oos_metrics else None,
+                "directional_accuracy": oos_metrics.directional_accuracy if oos_metrics else None,
+                "nochange_mae": oos_baselines.nochange_mae if oos_baselines else None,
+                "n": results.get("oos_n", 0),
+                "beats_nochange": results.get("beats_nochange_baseline"),
+            },
             "feature_config": {
                 "price_indicators": ["return_1d", "return_5d", "return_10d", "ma_5d", "ma_10d", "ma_20d", "volatility_10d", "rsi_14", "volume_ma", "volume_ratio"],
                 "sentiment_features": ["sentiment_social_score", "sentiment_news_score"],
@@ -310,7 +476,7 @@ def train_and_evaluate(
         },
         "git_commit": git_commit or "no_git_repo",
         "trained_at": datetime.now(timezone.utc).isoformat(),
-        "experimental": results["experimental"],
+        "experimental": results["experimental"] or (results.get("oos_n", 0) < 5),
     }
 
     return registry_entry

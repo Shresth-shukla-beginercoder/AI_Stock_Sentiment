@@ -23,6 +23,7 @@ import type {
   SentimentData,
   SocialPost,
   SystemStatusData,
+  TickerReport,
   TrainRequest,
 } from "../types/api";
 
@@ -82,6 +83,10 @@ export const listPredictions = (ticker: string, p?: PageParams) =>
 // --- reports / models -------------------------------------------------------
 export const getOverview = () => client.get<Envelope<OverviewData>>("/reports/overview").then((r) => r.data);
 export const getRanking = () => client.get<Envelope<RankingRow[]>>("/reports/ranking").then((r) => r.data);
+// W5: per-ticker, exchange-separated report (price / sentiment / direction / S-R / mentions).
+// Same shape demo and live return; nulls mark missing data, never zero.
+export const getTickerReport = () =>
+  client.get<Envelope<TickerReport>>("/reports/tickers").then((r) => r.data);
 
 export const listEvaluations = (p?: PageParams) =>
   client

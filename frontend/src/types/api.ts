@@ -204,6 +204,80 @@ export interface RankingRow {
   rank: number;
 }
 
+// W5: per-ticker, exchange-separated report — SAME shape demo & live return.
+// null marks "not yet known / no data stored"; a 0 is a real zero count.
+export interface TickerReportPrice {
+  close: number | null;
+  provider: string;
+  trade_date: string;
+}
+
+export interface TickerReportSentiment {
+  score: number | null;
+  signal: string | null;
+  state: string;
+}
+
+export interface TickerReportPrediction {
+  model_version: string;
+  target_date: string;
+  predicted_return: number | null;
+  predicted_price: number | null;
+  actual_close: number | null;
+  experimental: boolean;
+  direction: "up" | "down" | "flat" | "none";
+}
+
+export interface TickerReportSupportResistance {
+  support: number | null;
+  resistance: number | null;
+  method: string;
+  window_sessions: number;
+  available_sessions: number;
+  data_sufficient: boolean;
+  as_of: string | null;
+  basis: string;
+}
+
+export interface TickerReportRow {
+  ticker: string;
+  name: string | null;
+  rank: number;
+  current_price: TickerReportPrice | null;
+  sentiment: TickerReportSentiment;
+  direction: "up" | "down" | "flat" | "none";
+  prediction: TickerReportPrediction | null;
+  support_resistance: TickerReportSupportResistance;
+  position: "above_resistance" | "between" | "below_support" | "unknown";
+  mentions: { social_posts: number; news_articles: number; total: number };
+  is_demo: boolean;
+}
+
+export interface TickerReportExchange {
+  exchange: string;
+  timezone: string;
+  tickers: TickerReportRow[];
+}
+
+export interface TickerReport {
+  as_of: string;
+  exchanges: TickerReportExchange[];
+  ranking: TickerReportRow[];
+  meta: {
+    generated_at: string;
+    ranking_rule: string;
+    sentiment_thresholds: {
+      bullish: number;
+      bearish: number;
+      min_items: number;
+      window_days: number;
+    };
+    support_resistance_window_sessions: number;
+    direction_rule: string;
+    missing_policy: string;
+  };
+}
+
 // --- jobs -------------------------------------------------------------------
 export interface Job {
   id: number;

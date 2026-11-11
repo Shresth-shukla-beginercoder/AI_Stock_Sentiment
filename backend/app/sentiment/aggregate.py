@@ -10,26 +10,25 @@ from datetime import date, datetime, timezone
 from dataclasses import dataclass
 import math
 
-from sqlalchemy import select, and_, func, cast, Date
+from sqlalchemy import select, and_, func
 from sqlalchemy.orm import Session
 
 from app.database.models import Asset, SentimentResult, SocialPost, NewsArticle
+from app.features.sessions import session_utc_range
 from app.core.config import get_settings
 from app.core.logging import get_logger
 
 _log = get_logger("sentiment.aggregate")
 
 
-def _session_date_col(model) -> object:
-    """COALESCE(published_at, created_at) cast to DATE, for session-date grouping.
+def _session_ts_bounds(session_date: date, exchange: Optional[str]):
+    """W2: half-open UTC range [start, end) covering the exchange-LOCAL session.
 
-    Phase 5 correction 1 made published_at nullable: when a source had no
-    publication time, created_at (the collection instant) is the fallback. Both
-    are UTC timestamptz, so the calendar date is the UTC session date.
+    HKEX sessions run on UTC+8, KRX on UTC+9: a 15:30 UTC post belongs to the
+    KRX *next* session but the HKEX *same* one. Unknown exchanges use UTC.
     """
-    return cast(
-        func.coalesce(model.published_at, model.created_at), Date
-    )
+    start, end = session_utc_range(session_date, exchange)
+    return start, end
 
 
 @dataclass
@@ -74,28 +73,37 @@ def aggregate_sentiment_for_asset(
     """
     settings = get_settings()
 
-    # Query sentiment results for social posts on this asset/date
+    # W2: session filtering happens in the asset's EXCHANGE timezone (HKEX
+    # UTC+8, KRX UTC+9), not on the raw UTC calendar date.
+    asset = session.get(Asset, asset_id)
+    exchange = asset.exchange if asset else None
+    win_start, win_end = _session_ts_bounds(session_date, exchange)
+
+    ts_social = func.coalesce(SocialPost.published_at, SocialPost.created_at)
+    ts_news = func.coalesce(NewsArticle.published_at, NewsArticle.created_at)
+
+    # Query sentiment results for social posts on this asset/session
     social_results = session.execute(
         select(SentimentResult, SocialPost).where(
             and_(
                 SentimentResult.item_type == "social_post",
                 SentimentResult.item_id == SocialPost.id,
                 SocialPost.asset_id == asset_id,
-                # Filter by publishing date (or created_at if published_at is NULL)
-                func.date(func.coalesce(SocialPost.published_at, SocialPost.created_at)) == session_date,
+                ts_social >= win_start,
+                ts_social < win_end,
             )
         )
     ).all()
 
-    # Query sentiment results for news articles on this asset/date
+    # Query sentiment results for news articles on this asset/session
     news_results = session.execute(
         select(SentimentResult, NewsArticle).where(
             and_(
                 SentimentResult.item_type == "news_article",
                 SentimentResult.item_id == NewsArticle.id,
                 NewsArticle.asset_id == asset_id,
-                # Filter by publishing date (or created_at if published_at is NULL)
-                func.date(func.coalesce(NewsArticle.published_at, NewsArticle.created_at)) == session_date,
+                ts_news >= win_start,
+                ts_news < win_end,
             )
         )
     ).all()

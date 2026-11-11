@@ -42,8 +42,11 @@ class Settings(BaseSettings):
     exa_api_key: SecretStr | None = None
     tavily_api_key: SecretStr | None = None
     # Apify credential. APIFY_API_TOKEN is the single canonical name (used in
-    # Render and the local .env). apify_token() returns it.
+    # Render and the local .env). apify_token() returns it, falling back to the
+    # legacy APIFY_API_KEY alias when only that is set (compose exposes both;
+    # the canonical name wins).
     apify_api_token: SecretStr | None = None
+    apify_api_key: SecretStr | None = None  # legacy alias, never the primary
 
     # --- Market data provider: owner-selected as "twelve_data" (capability UNVERIFIED).
     # --- The name is a config value; vendor symbol coverage/quota/ToS stay UNVERIFIED
@@ -67,6 +70,14 @@ class Settings(BaseSettings):
     apify_actor_telegram: str = "lofomachines/telegram-keyword-search-scraper"
     apify_actor_kakao: str = ""
     apify_actor_naver: str = ""
+
+    # W1: bounded, cost-capped Actor execution. A collect:social job runs an
+    # actor only when it was verified for this exchange's configured refs and
+    # its input can be built from the actor's OWN schema/example (never guessed).
+    # The caps keep any run small and cheap.
+    apify_run_wait_seconds: int = 120       # poll deadline for one Actor run
+    apify_run_max_items: int = 30          # dataset items read per run (smoke size)
+    apify_run_max_charge_usd: float = 1.0  # hard per-run charge cap (USD)
 
     # ML determinism + out-of-sample rigor (Phase 14): fixed random seed and a
     # strict chronological holdout period after the walk-forward CV.
@@ -98,6 +109,10 @@ class Settings(BaseSettings):
     sentiment_threshold_bearish: float = -0.15  # score < -0.15 → bearish signal
     sentiment_min_items: int = 5  # min posts+news for sufficient data
     sentiment_window_days: int = 10  # rolling window for aggregation
+
+    # --- Support / resistance (W4) ---
+    # Trading sessions of stored price bars used for the window-extremes levels.
+    support_resistance_window_sessions: int = 20
     hf_cache_dir: str = "/models"  # Hugging Face model cache (hf_models volume)
 
     # ------------------------------------------------------------------ utils
@@ -125,20 +140,45 @@ class Settings(BaseSettings):
     )
 
     def apify_token(self) -> str | None:
-        """Effective Apify credential: APIFY_API_TOKEN (the single canonical name)."""
-        return self.apify_api_token.get_secret_value() if self.apify_api_token else None
+        """Effective Apify credential.
+
+        APIFY_API_TOKEN (canonical) wins; the legacy APIFY_API_KEY alias is used
+        only when the canonical name is unset.
+        """
+        if self.apify_api_token:
+            return self.apify_api_token.get_secret_value()
+        if self.apify_api_key:
+            return self.apify_api_key.get_secret_value()
+        return None
+
+    def _apify_present(self) -> bool:
+        return bool(self.apify_token())
 
     def missing_credentials(self) -> list[str]:
         """Names (upper-cased env var form) of credentials that are unset.
 
-        Apify has a single credential name (APIFY_API_TOKEN); it is reported
-        missing only when it is unset (see apify_token()).
+        Apify is satisfied by APIFY_API_TOKEN or the legacy APIFY_API_KEY
+        alias; it is reported missing only when neither is set.
         """
-        return [f.upper() for f in self.CREDENTIAL_FIELDS if not getattr(self, f)]
+        missing = []
+        for f in self.CREDENTIAL_FIELDS:
+            if f == "apify_api_token":
+                if not self._apify_present():
+                    missing.append("APIFY_API_TOKEN")
+            elif not getattr(self, f):
+                missing.append(f.upper())
+        return missing
 
     def configured_credentials(self) -> list[str]:
         """Names (upper-cased env var form) of credentials that are set."""
-        return [f.upper() for f in self.CREDENTIAL_FIELDS if getattr(self, f)]
+        configured = []
+        for f in self.CREDENTIAL_FIELDS:
+            if f == "apify_api_token":
+                if self._apify_present():
+                    configured.append("APIFY_API_TOKEN")
+            elif getattr(self, f):
+                configured.append(f.upper())
+        return configured
 
 
 

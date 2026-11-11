@@ -164,10 +164,18 @@ def list_prices(session: Session, ticker: str, limit: int, offset: int) -> tuple
 
 
 def sentiment_for_ticker(session: Session, ticker: str) -> dict[str, Any]:
+    """Sentiment aggregate for one ticker, wired to settings (W5/W7).
+
+    Thresholds, min-items and window come from config — never hard-coded —
+    so a config change flows through to every consumer (ranking, reports,
+    dashboard).
+    """
+    from app.core.config import get_settings
+    settings = get_settings()
     ids = _asset_ids(session, ticker)
     base: dict[str, Any] = {
         "asset_ticker": ticker,
-        "window_days": 10,
+        "window_days": settings.sentiment_window_days,
         "as_of": datetime.now(timezone.utc).isoformat(),
         "state": "no_data",
         "counts": {"positive": 0, "neutral": 0, "negative": 0},
@@ -209,14 +217,18 @@ def sentiment_for_ticker(session: Session, ticker: str) -> dict[str, Any]:
     score = round(p_pos - p_neg, 6)
     base.update(
         {
-            "state": "sufficient" if total >= 5 else "insufficient_data",
+            "state": "sufficient" if total >= settings.sentiment_min_items else "insufficient_data",
             "counts": counts,
             "total_items": total,
             "p_pos": round(p_pos, 6),
             "p_neu": round(p_neu, 6),
             "p_neg": round(p_neg, 6),
             "score": score,
-            "signal": "positive" if score > 0.15 else "negative" if score < -0.15 else "neutral",
+            "signal": (
+                "positive" if score > settings.sentiment_threshold_bullish
+                else "negative" if score < settings.sentiment_threshold_bearish
+                else "neutral"
+            ),
         }
     )
     return base
@@ -296,8 +308,35 @@ def overview(session: Session) -> dict[str, Any]:
     n_prices = session.execute(select(func.count()).select_from(MarketPrice)).scalar_one()
     n_preds = session.execute(select(func.count()).select_from(Prediction)).scalar_one()
     n_models = session.execute(select(func.count()).select_from(ModelEvaluation)).scalar_one()
+
+    # W5 parity: the live overview carries the same per_ticker shape as the
+    # demo overview (name, posts, news, price_days, sentiment_score,
+    # sentiment_signal, state) — the dashboard relies on it in both modes.
+    post_counts = dict(
+        session.execute(select(SocialPost.asset_id, func.count()).group_by(SocialPost.asset_id)).all()
+    )
+    news_counts = dict(
+        session.execute(select(NewsArticle.asset_id, func.count()).group_by(NewsArticle.asset_id)).all()
+    )
+    price_counts = dict(
+        session.execute(select(MarketPrice.asset_id, func.count()).group_by(MarketPrice.asset_id)).all()
+    )
+    per_ticker: dict[str, Any] = {}
+    for a in session.execute(select(Asset).order_by(Asset.exchange, Asset.ticker)).scalars():
+        s = sentiment_for_ticker(session, a.ticker)
+        per_ticker[a.ticker] = {
+            "name": a.name,
+            "posts": post_counts.get(a.id, 0),
+            "news": news_counts.get(a.id, 0),
+            "price_days": price_counts.get(a.id, 0),
+            "sentiment_score": s["score"],
+            "sentiment_signal": s["signal"],
+            "state": s["state"],
+        }
+
     return {
         "universe": [a["ticker"] for a in list_assets(session)],
+        "per_ticker": per_ticker,
         "counts": {
             "assets": n_assets,
             "social_posts": n_posts,
@@ -307,7 +346,7 @@ def overview(session: Session) -> dict[str, Any]:
             "model_versions": n_models,
         },
         "state": "no_data" if n_posts + n_news + n_prices + n_preds == 0 else "ok",
-        "note": "Live counts from the database — may be empty until Phases 5–8 run.",
+        "note": "Live counts from the database — may be empty until collection and training jobs have run.",
     }
 
 

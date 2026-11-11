@@ -4,7 +4,7 @@ Handlers connect to Phase 5 collectors and Phase 6 sentiment pipeline.
 """
 
 from typing import Optional, Dict, Any
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 
 from sqlalchemy import select, and_, func
 from sqlalchemy.orm import Session
@@ -146,53 +146,113 @@ def handle_backfill_market(session: Session, job: CollectionJob) -> Dict[str, An
 
 
 def handle_collect_social(session: Session, job: CollectionJob) -> Dict[str, Any]:
-    """Handle collect:social job - fetch social media posts via Apify.
+    """Handle collect:social job — run the exchange's configured Apify Actors.
 
-    The Apify candidate Actors are UNVERIFIED (see app/collectors/apify.py).
-    This handler performs the read-only ``verify_actor`` step; it never runs an
-    Actor unless the candidate was verified *and* the owner approved a run.
+    W1: execution is CONFIG-DRIVEN (``settings.apify_actor_*``), never the old
+    hard-coded candidate list. Per configured platform the worker:
+
+    1. verifies the actor exists and is accessible for this account;
+    2. builds the run input from the actor's OWN example/schema (never guessed
+       fields — an input that cannot be built safely is recorded and skipped);
+    3. runs the actor with bounded wait, item cap and charge cap
+       (``apify_run_wait_seconds`` / ``apify_run_max_items`` /
+       ``apify_run_max_charge_usd``);
+    4. maps the dataset output to normalized posts and persists them
+       (ON CONFLICT DO NOTHING dedupe; engagement NULL when unknown).
+
+    Unconfigured platforms (e.g. KRX kakao/naver) are recorded as
+    ``not configured`` — never filled with an invented actor. Transient
+    failures on every attempted run raise so the worker retries with backoff;
+    per-actor outcomes are always included in the job counts.
     """
-    from app.collectors.apify import ApifySocialCollector, CANDIDATE_ACTORS
+    from app.collectors.apify import ApifySocialCollector, resolve_exchange_actors
+    from app.collectors.exceptions import TransientError, RateLimitError
+    from app.services.persist import resolve_asset, persist_social
 
     settings = get_settings()
     params = job.params or {}
-    ticker = params.get("ticker") or "unknown"
+    ticker = params.get("ticker")
+    if not ticker:
+        raise ValueError("collect:social requires params['ticker']")
     target_date = date.fromisoformat(params["target_date"])
+    exchange = params.get("exchange")
 
-    _log.info("collecting social posts", extra={"ticker": ticker, "date": target_date.isoformat()})
+    _log.info("collecting social posts",
+              extra={"ticker": ticker, "date": target_date.isoformat(), "exchange": exchange})
 
-    collector = ApifySocialCollector(settings=settings)
+    asset = resolve_asset(session, ticker, exchange)
+    if asset is None:
+        _log.warning("collect:social: asset not resolved; skipping", extra={"ticker": ticker})
+    collector = ApifySocialCollector(settings=settings,
+                                     run_wait_seconds=settings.apify_run_wait_seconds)
+    records = resolve_exchange_actors(settings, exchange, collector, ticker)
 
-    # Verify each candidate (read-only, no run). Record outcomes; do not
-    # silently replace or fabricate data.
-    verify_results = []
-    for candidate in CANDIDATE_ACTORS:
-        try:
-            availability = collector.verify_actor(candidate.ref, candidate.platform)
-        except Exception as e:
-            # Verification failed (auth/transport). Record honestly; do not raise.
-            _log.warning("social actor verify failed",
-                         extra={"actor": candidate.ref, "error": str(e)})
-            verify_results.append({"actor": candidate.ref, "available": False,
-                                  "reason": f"verify raised: {e}"})
+    fetched = 0
+    inserted = 0
+    skipped = 0
+    attempted = 0
+    hard_failures = 0
+    for rec in records:
+        if not rec["configured"] or not rec["available"] or rec["run_input"] is None:
             continue
-        verify_results.append({
-            "actor": candidate.ref,
-            "available": availability.available,
-            "reason": availability.reason,
-        })
+        if asset is None:
+            rec["note"] = "asset not resolved; fetched data is NOT persisted"
+            continue
+        attempted += 1
+        try:
+            run = collector.run_actor(
+                rec["actor"],
+                rec["run_input"],
+                wait=None,  # uses run_wait_seconds from settings
+                max_items=settings.apify_run_max_items,
+                max_total_charge_usd=settings.apify_run_max_charge_usd,
+            )
+        except (TransientError, RateLimitError) as e:
+            hard_failures += 1
+            rec["note"] = f"run failed ({type(e).__name__}): {e}"
+            _log.warning("social actor run failed",
+                         extra={"actor": rec["actor"], "platform": rec["platform"],
+                                "error": str(e)[:200]})
+            continue
+        except Exception as e:  # provider/other hard error
+            hard_failures += 1
+            rec["note"] = f"run failed ({type(e).__name__}): {e}"
+            _log.warning("social actor run failed (unexpected)",
+                         extra={"actor": rec["actor"], "platform": rec["platform"],
+                                "error": str(e)[:200]})
+            continue
+        raw = collector.fetch_items(run)
+        items = collector.to_social_items(raw, platform=rec["platform"])
+        rec["fetched"] = len(raw)
+        rec["mapped"] = len(items)
+        if items:
+            res = persist_social(session, asset.id, items)
+            inserted += res.inserted
+            skipped += res.skipped_duplicates
+            fetched += len(items)
+            rec["inserted"] = res.inserted
+            rec["skipped_duplicates"] = res.skipped_duplicates
+        else:
+            rec["note"] = "run completed, 0 usable posts (empty dataset or unmappable items)"
 
-    # No actor is approved for running (Phase 5 boundary); we only record.
-    _log.info("social collect: verification recorded, no runs approved",
-              extra={"ticker": ticker, "actors": [v["actor"] for v in verify_results]})
+    if asset is not None:
+        session.commit()
+
+    if hard_failures and hard_failures == attempted:
+        # Every attempted actor run failed -> let the worker retry the job.
+        raise TransientError(
+            f"all {attempted} attempted social actor run(s) failed; "
+            f"outcomes: {[r.get('note') or r['reason'] for r in records if r.get('note')]}"
+        )
 
     return {
         "provider": "apify",
-        "fetched": 0,
-        "inserted": 0,
-        "skipped_duplicates": 0,
-        "verifications": verify_results,
-        "note": "actor runs not approved in Phase 5/7; verification recorded only",
+        "exchange": exchange,
+        "fetched": fetched,
+        "inserted": inserted,
+        "skipped_duplicates": skipped,
+        "asset_resolved": asset is not None,
+        "actors": records,
     }
 
 
@@ -227,12 +287,29 @@ def handle_collect_news(session: Session, job: CollectionJob) -> Dict[str, Any]:
             "asset_resolved": False,
         }
 
-    result = persist_news(session, asset.id, items)
+    # W3: drop articles that do not mention the asset (name / ticker /
+    # provider ticker). Metadata and publication timestamps are preserved on
+    # every item that is kept.
+    from app.collectors.relevance import filter_asset_relevant
+    kept, rel = filter_asset_relevant(
+        items,
+        name=asset.name,
+        ticker=ticker,
+        provider_ticker=asset.provider_ticker,
+    )
+
+    result = persist_news(session, asset.id, kept)
     session.commit()
 
     return {
         "provider": "exa",
         "fetched": len(items),
+        "relevance": {
+            "relevant": rel.relevant,
+            "ambiguous_kept": rel.ambiguous,
+            "irrelevant_dropped": rel.irrelevant_dropped,
+            "no_ticker_kept": rel.no_ticker_kept,
+        },
         "inserted": result.inserted,
         "skipped_duplicates": result.skipped_duplicates,
         "null_published_at": result.null_published_at,
@@ -255,31 +332,47 @@ def handle_score_sentiment(session: Session, job: CollectionJob) -> Dict[str, An
         analyze,
         persist_sentiment_result,
     )
-    from app.database.models import SocialPost, NewsArticle
+    from app.database.models import SocialPost, NewsArticle, Asset
+    from app.features.sessions import session_utc_range
 
     params = job.params or {}
     asset_id = params.get("asset_id")
     ticker = params.get("ticker")
     session_date = date.fromisoformat(params["session_date"])
 
-    _log.info("scoring sentiment", extra={"ticker": ticker, "date": session_date.isoformat()})
+    # W2: the session date is an EXCHANGE-LOCAL day. Resolve the asset's
+    # exchange and filter by the UTC half-open range that covers it
+    # (HK = UTC+8, KR = UTC+9), not by a raw UTC calendar date.
+    asset = session.get(Asset, asset_id) if asset_id else None
+    exchange = params.get("exchange") or (asset.exchange if asset else None)
+    win_start, win_end = session_utc_range(session_date, exchange)
 
-    # Fetch social posts for this asset/date (published_at or created_at day).
+    _log.info("scoring sentiment",
+              extra={"ticker": ticker, "date": session_date.isoformat(),
+                     "exchange": exchange,
+                     "session_utc_range": [win_start.isoformat(), win_end.isoformat()]})
+
+    ts_social = func.coalesce(SocialPost.published_at, SocialPost.created_at)
+    ts_news = func.coalesce(NewsArticle.published_at, NewsArticle.created_at)
+
+    # Fetch social posts for this asset's session (published_at, else created_at).
     social_posts = session.execute(
         select(SocialPost).where(
             and_(
                 SocialPost.asset_id == asset_id,
-                func.date(func.coalesce(SocialPost.published_at, SocialPost.created_at)) == session_date,
+                ts_social >= win_start,
+                ts_social < win_end,
             )
         )
     ).scalars().all()
 
-    # Fetch news articles for this asset/date.
+    # Fetch news articles for the same session.
     news_articles = session.execute(
         select(NewsArticle).where(
             and_(
                 NewsArticle.asset_id == asset_id,
-                func.date(func.coalesce(NewsArticle.published_at, NewsArticle.created_at)) == session_date,
+                ts_news >= win_start,
+                ts_news < win_end,
             )
         )
     ).scalars().all()
@@ -362,6 +455,150 @@ def handle_score_sentiment(session: Session, job: CollectionJob) -> Dict[str, An
     }
 
 
+# W6: real "train" handler — previously unsupported (worker marked train jobs
+# as permanent failures). Trains per ticker, registers the model version, and
+# persists the next-TRADING-session prediction.
+def handle_train(session: Session, job: CollectionJob) -> Dict[str, Any]:
+    """Handle a train job: per-ticker walk-forward + holdout + OOS reporting.
+
+    params: {"tickers": [...]} (empty/None = all confirmed+active assets),
+            optional "model_name" (default "wf-ridge").
+
+    Per ticker:
+      - build features from stored prices + sentiment (live rows only);
+      - walk-forward CV + strict chronological holdout (settings.ml_random_seed
+        / settings.ml_holdout_ratio), with no-change & always-up baselines;
+      - register the model version (skipped honestly if already registered);
+      - persist the next-TRADING-session prediction (target date = the next
+        observed bar's date, price basis = that row's CLOSE, never a return).
+
+    OOS honesty: the registry entry carries the holdout metrics; if the model
+    does not beat the no-change baseline, that is recorded, not hidden.
+    """
+    from datetime import datetime
+    from app.database.models import Asset
+    from app.features.build_features import build_features, filter_for_training
+    from app.models.trainer import train_and_evaluate, predict_next_session
+    from app.models.registry import register_model, persist_predictions, get_model
+    from app.features.make_target import predicted_price as _pp
+
+    def _git_commit() -> str:
+        # Real commit for the model registry when running inside a git worktree;
+        # otherwise an honest placeholder. Never invent a SHA.
+        import subprocess
+        try:
+            out = subprocess.run(
+                ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                return out.stdout.strip()
+        except Exception:
+            pass
+        return "no_git_repo"
+
+    settings = get_settings()
+    params = job.params or {}
+    tickers = params.get("tickers") or []
+    model_name = params.get("model_name") or "wf-ridge"
+
+    q = select(Asset).where(Asset.confirmed == True, Asset.active == True)  # noqa: E712
+    assets = list(session.execute(q).scalars().all())
+    if tickers:
+        wanted = set(tickers)
+        assets = [a for a in assets
+                  if a.ticker in wanted or (a.provider_ticker and a.provider_ticker in wanted)]
+
+    results: list[Dict[str, Any]] = []
+    for asset in assets:
+        entry: Dict[str, Any] = {"ticker": asset.ticker, "model_name": model_name}
+        try:
+            rows = build_features(session, asset.id, lookback_days=90)
+            trainable = filter_for_training(rows, require_target=True)
+            if len(trainable) < 10:
+                entry["status"] = "insufficient_history"
+                entry["rows"] = len(trainable)
+                results.append(entry)
+                continue
+
+            stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
+            version = f"{model_name}-{stamp}-{asset.ticker}"
+            if get_model(session, version) is not None:
+                entry["status"] = "version_already_registered"
+                entry["model_version"] = version
+                results.append(entry)
+                continue
+
+            registry_entry = train_and_evaluate(
+                trainable,
+                model_version=version,
+                git_commit=_git_commit(),
+                seed=settings.ml_random_seed,
+                holdout_ratio=settings.ml_holdout_ratio,
+            )
+            register_model(
+                session,
+                model_version=registry_entry["model_version"],
+                mae=registry_entry.get("mae"),
+                rmse=registry_entry.get("rmse"),
+                directional_accuracy=registry_entry.get("directional_accuracy"),
+                baseline_nochange_mae=registry_entry.get("baseline_nochange_mae"),
+                baseline_nochange_rmse=registry_entry.get("baseline_nochange_rmse"),
+                baseline_nochange_dir_acc=registry_entry.get("baseline_nochange_dir_acc"),
+                baseline_alwaysup_dir_acc=registry_entry.get("baseline_alwaysup_dir_acc"),
+                n_test=registry_entry.get("n_test"),
+                params=registry_entry.get("params"),
+                git_commit=registry_entry.get("git_commit"),
+                force=False,
+            )
+            entry.update({
+                "status": "trained",
+                "model_version": version,
+                "oos_mae": registry_entry.get("oos_mae"),
+                "oos_nochange_mae": registry_entry.get("oos_nochange_mae"),
+                "beats_nochange_baseline": registry_entry.get("beats_nochange_baseline"),
+                "experimental": registry_entry.get("experimental"),
+            })
+
+            # Next-trading-session prediction from the LAST row only.
+            pred = predict_next_session(
+                trainable,
+                seed=settings.ml_random_seed,
+            )
+            if pred is None or pred["target_date"] is None:
+                entry["prediction"] = "skipped (no target session resolvable)"
+            else:
+                # Sanity: price basis must be the row's CLOSE, never a return.
+                assert pred["predicted_price"] is None or _pp(
+                    pred["basis_close"], pred["predicted_return"]
+                ) == pred["predicted_price"]
+                persisted = persist_predictions(
+                    session,
+                    asset.id,
+                    version,
+                    [{
+                        "target_date": pred["target_date"],
+                        "predicted_return": pred["predicted_return"],
+                        "predicted_price": pred["predicted_price"],
+                        "actual_close": None,  # backfilled later (W6)
+                        "experimental": pred["experimental"] or registry_entry.get("experimental", True),
+                    }],
+                )
+                entry["prediction"] = {
+                    "target_date": pred["target_date"].isoformat(),
+                    "predicted_return": pred["predicted_return"],
+                    "predicted_price": pred["predicted_price"],
+                    "persisted": persisted,
+                }
+        except Exception as e:
+            entry["status"] = f"failed: {type(e).__name__}: {e}"
+        results.append(entry)
+
+    session.commit()
+    _log.info("train job complete", extra={"tickers": len(results)})
+    return {"trained": [r for r in results if r.get("status") == "trained"],
+            "results": results}
+
+
 # Dispatcher registry
 HANDLERS = {
     "collect:market": handle_collect_market,
@@ -369,6 +606,7 @@ HANDLERS = {
     "collect:social": handle_collect_social,
     "collect:news": handle_collect_news,
     "score:sentiment": handle_score_sentiment,
+    "train": handle_train,
 }
 
 
@@ -384,8 +622,11 @@ def dispatch_job(session: Session, job: CollectionJob) -> Dict[str, Any]:
     handler = HANDLERS.get(job.job_type)
 
     if handler is None:
-        reason = "handler_not_implemented_yet" if job.job_type == "train" else "unknown_job_type"
-        raise UnsupportedJobError(job.job_type, reason, f"No handler registered for job type: {job.job_type}")
+        raise UnsupportedJobError(
+            job.job_type,
+            "unknown_job_type",
+            f"No handler registered for job type: {job.job_type}",
+        )
 
     _log.debug("dispatching job", extra={"job_id": job.id, "job_type": job.job_type})
 

@@ -162,19 +162,19 @@ A research platform that collects social media posts and news articles for 10 ma
 
 ```bash
 # Get system status
-curl http://localhost:8000/api/system
+curl http://localhost:8000/api/system/status
 
 # List assets
 curl http://localhost:8000/api/assets
 
-# Get predictions (admin-only endpoint requires X-API-Key)
-curl -H "X-API-Key: demo-key-12345" http://localhost:8000/api/predictions
+# Get next-day predictions for one ticker (public; demo universe)
+curl http://localhost:8000/api/predictions/DEMO-HK-001
 
-# Trigger a collection job (requires admin key)
-curl -X POST -H "X-API-Key: demo-key-12345" \
+# Trigger a collection job (admin-only; requires API_ADMIN_KEY)
+curl -X POST -H "X-API-Key: $API_ADMIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"ticker":"0700.HK","job_type":"collect:market"}' \
-  http://localhost:8000/api/jobs
+  -d '{"tickers":["DEMO-HK-001"],"source":"all"}' \
+  http://localhost:8000/api/collect/run
 ```
 
 ---
@@ -358,75 +358,73 @@ GET /api/assets
 
 ```bash
 # Get system overview
-GET /api/system
+GET /api/system/status
 
-# Includes credential availability and live-data status
+# Includes data mode, provider name, credential availability and feature status
 {
+  "success": true,
   "data": {
-    "uptime_seconds": 3600,
-    "api_version": "1.0.0",
-    "database": {
-      "connected": true,
-      "tables": 8
-    },
-    "credentials": {
-      "market_data_provider_configured": true,
-      "exa_configured": false,
-      "tavily_configured": true,
-      "apify_configured": false
-    }
+    "app": "ai-stock-backend",
+    "version": "1.0.0",
+    "data_mode": "demo",
+    "market_data_provider": "twelve_data",
+    "credentials": { "configured": ["EXA_API_KEY", "..."], "missing": ["TWELVE_DATA_API_KEY"] },
+    "feature_status": { "collectors": "implemented (Phase 5): ...", "worker": "implemented (Phase 7): ..." }
   },
-  "meta": {...}
+  "data_mode": "demo",
+  "as_of": "2026-11-11T05:00:00+00:00"
 }
 ```
 
-### Predictions (Admin Only)
+### Predictions
 
 ```bash
-# Get next-day predictions
-GET /api/predictions -H "X-API-Key: <admin-key>"
+# Get next-session predictions (public, no admin key required)
+GET /api/predictions/{ticker}
 
-# Includes walk-forward metrics
+# Includes the stored next-trading-session predictions (nulls = not yet known)
 {
   "data": [
     {
-      "ticker": "0700.HK",
-      "date": "2026-11-09",
-      "predicted_return": 0.025,
-      "confidence": 0.58,
-      "experimental": false,
-      "metrics": {
-        "mae": 0.015,
-        "rmse": 0.018,
-        "directional_accuracy": 0.62
-      }
+      "id": 12,
+      "asset_ticker": "0700.HK",
+      "model_version": "hf-lr-2026-11-10",
+      "target_date": "2026-11-12",
+      "made_at": "2026-11-11T03:00:00+00:00",
+      "predicted_return": 0.0042,
+      "predicted_price": 356.18,
+      "actual_close": null,
+      "experimental": false
     }
   ],
   "meta": {...}
 }
 ```
 
-### Jobs (Admin Only)
+Model metrics (MAE / RMSE / directional accuracy vs the no-change & always-up
+baselines) are exposed at `GET /api/models/evaluation`, not on each
+prediction row.
+
+### Jobs & Collection (Admin Only)
+
+Jobs are queued through the persistent relational DB queue and executed by the
+worker service. There is no generic `POST /api/jobs` — use the source-specific
+endpoints below (both return **202** on a real insert, **409** on duplicate).
 
 ```bash
-# Create a job
-POST /api/jobs -H "X-API-Key: <admin-key>" \
+# Queue per-ticker collection jobs (social / news / market)
+POST /api/collect/run -H "X-API-Key: <admin-key>" \
   -H "Content-Type: application/json" \
   -d {
-    "ticker": "0700.HK",
-    "job_type": "collect:market",
-    "run_after": "2026-11-09T21:00:00Z"
+    "tickers": ["0700.HK"],
+    "source": "all",
+    "label": "manual"
   }
 
-# Response: 202 Accepted with job_id
-{
-  "data": {
-    "job_id": "uuid",
-    "status": "queued",
-    "attempts": 0
-  },
-  "meta": {...}
-}
+# Queue a training job
+POST /api/models/train -H "X-API-Key: <admin-key>" \
+  -H "Content-Type: application/json" \
+  -d { "tickers": ["0700.HK"], "model_name": "auto" }
 
 # Get job status
 GET /api/jobs/<job_id> -H "X-API-Key: <admin-key>"

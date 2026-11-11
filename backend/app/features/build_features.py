@@ -57,6 +57,12 @@ class FeatureRow:
     sentiment_news_count: Optional[int] = None
     # Target (next-day return)
     target_return: Optional[float] = None
+    # W6: the close that the next-session return is computed FROM, and the
+    # actual next TRADING session date (from the observed bar sequence, not a
+    # calendar +1). Both stay None when unknown — predictions must never be
+    # built on a calendar-day guess or on a return value used as a price.
+    close: Optional[float] = None
+    next_trade_date: Optional[date] = None
     # Metadata
     is_demo: bool = False
     sentiment_experimental: bool = False  # True if insufficient sentiment overlap
@@ -88,6 +94,10 @@ def build_features(
         List of FeatureRow objects, one per trading day, sorted by date.
     """
     from app.database.models import Asset
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    min_items = settings.sentiment_min_items
 
     asset = session.get(Asset, asset_id)
     if not asset:
@@ -239,11 +249,13 @@ def build_features(
             row.sentiment_social_count = social_count
             row.sentiment_news_score = news_score
             row.sentiment_news_count = news_count
-            # Mark experimental if insufficient data
-            if (social_count + news_count) < 3:
+            # Mark experimental if insufficient data (config threshold, W7)
+            if (social_count + news_count) < min_items:
                 row.sentiment_experimental = True
 
         row.target_return = targets.get(date_val)
+        row.close = price_info[1]
+        row.next_trade_date = sorted_dates[idx + 1] if idx + 1 < len(sorted_dates) else None
         rows.append(row)
 
     _log.info(

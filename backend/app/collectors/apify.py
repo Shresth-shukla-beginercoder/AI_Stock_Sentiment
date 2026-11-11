@@ -14,6 +14,7 @@ silently replaced** — see the :class:`ActorAvailability` dataclass and the
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -149,13 +150,27 @@ class ApifySocialCollector:
         is_dep = getattr(info, "is_deprecated", None)
         versions = getattr(info, "versions", None) or []
         input_schema = None
-        example_input = getattr(info, "example_run_input", None)
         for v in versions:
             # The default/latest version carries the input schema.
             schema = getattr(v, "input_schema", None)
-            if schema is not None:
+            if isinstance(schema, dict):
                 input_schema = schema
                 break
+
+        # SDK 3.x exposes the actor's own example input as an ExampleRunInput
+        # model whose ``body`` is the JSON-serialized sample (or the raw string
+        # for non-JSON types). Parse it so build_run_input can work from the
+        # actor's OWN documented example — nothing is invented here.
+        example_input: Optional[dict] = None
+        example = getattr(info, "example_run_input", None)
+        body = getattr(example, "body", None)
+        if isinstance(body, str) and body.strip():
+            try:
+                parsed = json.loads(body)
+            except (json.JSONDecodeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict):
+                example_input = parsed
 
         reason = "available"
         if is_dep:
@@ -270,3 +285,135 @@ class ApifySocialCollector:
             ))
         _log.info("apify items mapped", extra={"platform": platform, "items": len(out)})
         return out
+
+
+# ---------------------------------------------------------------------------
+# W1: config-driven actor execution
+# ---------------------------------------------------------------------------
+
+#: Per-exchange platform -> Settings field holding the owner-supplied Actor ref.
+#: An empty ref means "not configured" for that exchange: the worker records it
+#: honestly and never invents an Actor id.
+EXCHANGE_ACTOR_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
+    "HKEX": (("lihkg", "apify_actor_lihkg"), ("telegram", "apify_actor_telegram")),
+    "KRX": (("kakao", "apify_actor_kakao"), ("naver", "apify_actor_naver")),
+}
+
+#: String schema/example keys whose value is a *searchable ticker/keyword*.
+#: Only these may be filled with the ticker; any other field is left untouched
+#: or the input is declared not safely constructible.
+_QUERY_KEY_HINTS = ("keyword", "search", "query", "channel", "ticker", "stock", "text")
+
+
+def configured_actors(settings, exchange: Optional[str]) -> list[tuple[str, str]]:
+    """[(platform, actor_ref)] for the exchange's configured Actor refs.
+
+    Unknown exchanges fall back to the HKEX set only when it has refs; an
+    unrecognised exchange returns whatever refs exist, honestly labelled.
+    """
+    exchange_key = (exchange or "").upper()
+    fields = EXCHANGE_ACTOR_FIELDS.get(exchange_key, EXCHANGE_ACTOR_FIELDS.get("HKEX", ()))
+    out: list[tuple[str, str]] = []
+    for platform, field in fields:
+        ref = getattr(settings, field, "") or ""
+        out.append((platform, ref.strip()))
+    return out
+
+
+def build_run_input(
+    availability: ActorAvailability,
+    ticker: str,
+) -> tuple[Optional[dict], str]:
+    """Build an Actor run input WITHOUT guessing fields.
+
+    Returns ``(input, note)`` where ``input`` is None when it cannot be built
+    safely (the run is then skipped and the reason recorded).
+
+    Strategy, in order:
+    1. Actor-provided ``example_run_input`` (a dict): the actor's own
+       documented example. Any query-like key that is empty gets the ticker;
+       otherwise the example is used as-is.
+    2. Otherwise the input schema's ``required`` string properties: query-like
+       keys get the ticker. If ANY required property cannot be filled this
+       way (numbers, booleans, unknown keys, e.g. a channel-username list),
+       the input is declared not constructible — never invent values.
+    3. No schema and no example -> not constructible.
+    """
+    example = availability.example_input
+    if isinstance(example, dict):
+        inp = dict(example)
+        filled = False
+        for key, value in inp.items():
+            if isinstance(value, str) and not value.strip():
+                lowered = str(key).lower()
+                if any(h in lowered for h in _QUERY_KEY_HINTS):
+                    inp[key] = ticker
+                    filled = True
+        note = "actor example input used" + (", query field(s) set to ticker" if filled else "")
+        return inp, note
+
+    schema = availability.input_schema or {}
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    required = [k for k in (schema.get("required") or []) if isinstance(k, str)] if isinstance(schema, dict) else []
+    if isinstance(props, dict) and required:
+        inp: dict = {}
+        for key in required:
+            ptype = (props.get(key) or {}).get("type")
+            lowered = key.lower()
+            if ptype in ("string", None) and any(h in lowered for h in _QUERY_KEY_HINTS):
+                inp[key] = ticker
+            elif ptype in ("string", None) and key in props:
+                # Non-query string with a schema default? Use it; else impossible.
+                default = (props.get(key) or {}).get("default")
+                if default is not None:
+                    inp[key] = default
+                else:
+                    return None, (
+                        f"required input '{key}' is not a query field and has no schema "
+                        f"default — input not safely constructible (schema inspected, no guessing)"
+                    )
+            else:
+                return None, (
+                    f"required input '{key}' (type={ptype}) cannot be filled without "
+                    f"guessing — input not safely constructible"
+                )
+        return inp, "built from schema required string properties"
+
+    return None, "no example input and no usable input schema — input not constructible"
+
+
+def resolve_exchange_actors(settings, exchange: Optional[str],
+                            collector: "ApifySocialCollector",
+                            ticker: str) -> list[dict]:
+    """Verify each configured actor for the exchange and build a run input.
+
+    Returns one record per configured platform:
+    {platform, actor, configured, available, reason, run_input, input_note}
+    Unconfigured platforms are recorded (not errors). Never raises on a
+    per-actor verification problem — those are recorded.
+    """
+    records: list[dict] = []
+    for platform, ref in configured_actors(settings, exchange):
+        rec: dict = {"platform": platform, "actor": ref or None,
+                     "configured": bool(ref), "available": False,
+                     "reason": "not configured", "run_input": None, "input_note": None}
+        if not ref:
+            records.append(rec)
+            continue
+        try:
+            avail = collector.verify_actor(ref, platform)
+        except Exception as e:
+            rec["reason"] = f"verify raised: {e}"
+            records.append(rec)
+            continue
+        rec["available"] = avail.available
+        rec["reason"] = avail.reason
+        if avail.available:
+            inp, note = build_run_input(avail, ticker)
+            rec["run_input"] = inp
+            rec["input_note"] = note
+            if inp is None:
+                rec["reason"] = f"available but {note}"
+                rec["available"] = False
+        records.append(rec)
+    return records

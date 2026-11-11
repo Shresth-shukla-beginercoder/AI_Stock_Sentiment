@@ -66,20 +66,34 @@ def test_pipeline_stage_empty_result():
     assert stage.data["reason"] == "empty_result"
 
 
-@patch("app.services.orchestrate.TwelveDataProvider")
+@patch("app.services.orchestrate.fetch_daily_prices")
+@patch("app.services.orchestrate.market_provider_chain")
 @patch("app.services.orchestrate.persist_market_prices")
-def test_stage_collect_market_prices_success(mock_persist, mock_provider, session_mock):
-    """Collect market prices stage succeeds with valid data."""
+def test_stage_collect_market_prices_success(
+    mock_persist, mock_chain, mock_fetch, session_mock
+):
+    """Collect market prices stage succeeds with valid data.
+
+    The stage runs the provider chain (primary Twelve Data + yfinance
+    fallback), so the seam is patched at ``market_provider_chain`` /
+    ``fetch_daily_prices`` instead of the old direct provider class.
+    Outcome assertions are unchanged.
+    """
     asset = Mock(spec=Asset)
     asset.id = 1
     asset.ticker = "0700.HK"
 
-    mock_provider_instance = Mock()
-    mock_provider_instance.get_daily_prices.return_value = [
-        {"date": date(2026, 11, 1), "close": 100.0},
-        {"date": date(2026, 11, 2), "close": 102.0},
-    ]
-    mock_provider.return_value = mock_provider_instance
+    mock_provider = Mock()
+    mock_provider.provider_name = "twelvedata"
+    mock_chain.return_value = [mock_provider]
+    mock_fetch.return_value = (
+        mock_provider,
+        [
+            {"date": date(2026, 11, 1), "close": 100.0},
+            {"date": date(2026, 11, 2), "close": 102.0},
+        ],
+        ["twelvedata:ok"],
+    )
 
     pipeline = EndToEndPipeline(session_mock)
     stage = pipeline.stage_collect_market_prices(
@@ -94,15 +108,17 @@ def test_stage_collect_market_prices_success(mock_persist, mock_provider, sessio
     mock_persist.assert_called_once()
 
 
-@patch("app.services.orchestrate.TwelveDataProvider")
-def test_stage_collect_market_prices_empty(mock_provider, session_mock):
+@patch("app.services.orchestrate.fetch_daily_prices")
+@patch("app.services.orchestrate.market_provider_chain")
+def test_stage_collect_market_prices_empty(mock_chain, mock_fetch, session_mock):
     """Collect market prices stage handles empty results."""
     asset = Mock(spec=Asset)
     asset.ticker = "UNKNOWN"
 
-    mock_provider_instance = Mock()
-    mock_provider_instance.get_daily_prices.return_value = []
-    mock_provider.return_value = mock_provider_instance
+    mock_provider = Mock()
+    mock_provider.provider_name = "twelvedata"
+    mock_chain.return_value = [mock_provider]
+    mock_fetch.return_value = (mock_provider, [], ["twelvedata:empty", "yfinance:empty"])
 
     pipeline = EndToEndPipeline(session_mock)
     stage = pipeline.stage_collect_market_prices(
@@ -116,15 +132,17 @@ def test_stage_collect_market_prices_empty(mock_provider, session_mock):
     assert stage.data["reason"] == "empty_result"
 
 
-@patch("app.services.orchestrate.TwelveDataProvider")
-def test_stage_collect_market_prices_error(mock_provider, session_mock):
+@patch("app.services.orchestrate.fetch_daily_prices")
+@patch("app.services.orchestrate.market_provider_chain")
+def test_stage_collect_market_prices_error(mock_chain, mock_fetch, session_mock):
     """Collect market prices stage handles errors gracefully."""
     asset = Mock(spec=Asset)
     asset.ticker = "0700.HK"
 
-    mock_provider_instance = Mock()
-    mock_provider_instance.get_daily_prices.side_effect = RuntimeError("API rate limit")
-    mock_provider.return_value = mock_provider_instance
+    mock_provider = Mock()
+    mock_provider.provider_name = "twelvedata"
+    mock_chain.return_value = [mock_provider]
+    mock_fetch.side_effect = RuntimeError("API rate limit")
 
     pipeline = EndToEndPipeline(session_mock)
     stage = pipeline.stage_collect_market_prices(
@@ -140,17 +158,45 @@ def test_stage_collect_market_prices_error(mock_provider, session_mock):
 @patch("app.services.orchestrate.ExaNewsCollector")
 @patch("app.services.orchestrate.persist_news")
 def test_stage_collect_news_success(mock_persist, mock_collector, session_mock):
-    """Collect news stage succeeds with valid data."""
+    """Collect news stage succeeds with valid data.
+
+    The stage now relevance-filters items before persistence (W3), so the mock
+    search returns real ``NewsItem`` objects (the shape the actual collector
+    returns) whose titles mention the asset, with concrete asset name /
+    provider ticker for the relevance filter to match. Outcome assertions are
+    unchanged.
+    """
+    from app.collectors.exa import NewsItem
+
     asset = Mock(spec=Asset)
     asset.id = 1
     asset.ticker = "0700.HK"
+    asset.name = "Tencent"
+    asset.provider_ticker = "0700"
 
     mock_collector_instance = Mock()
     mock_collector_instance.search.return_value = [
-        {"title": "News 1", "url": "http://example.com/1"},
-        {"title": "News 2", "url": "http://example.com/2"},
+        NewsItem(
+            url="http://example.com/1",
+            url_hash="h1",
+            title="Tencent (0700.HK) reports strong quarter",
+            body="Tencent posted strong results.",
+            published_at=None,
+            author=None,
+            source="example.com",
+        ),
+        NewsItem(
+            url="http://example.com/2",
+            url_hash="h2",
+            title="Tencent shares jump on 0700.HK buyback",
+            body="More Tencent news.",
+            published_at=None,
+            author=None,
+            source="example.com",
+        ),
     ]
     mock_collector.return_value = mock_collector_instance
+    mock_persist.return_value = Mock(inserted=2, skipped_duplicates=0, null_published_at=0)
 
     pipeline = EndToEndPipeline(session_mock)
     stage = pipeline.stage_collect_news(asset)
@@ -180,12 +226,25 @@ def test_stage_collect_news_empty(mock_collector, session_mock):
 
 @patch("app.services.orchestrate.ApifySocialCollector")
 def test_stage_collect_social_actor_not_verified(mock_collector, session_mock):
-    """Collect social stage handles unverified actor (Phase 5 limitation)."""
+    """Collect social stage handles an unverified actor: recorded, 0 records, honest reason.
+
+    The stage now resolves actors per the exchange's configured refs (W1);
+    an unavailable/unverified actor is recorded and reported as
+    ``actor_not_verified`` — never replaced with an invented actor. The mock
+    ``verify_actor`` returns the real ``ActorAvailability`` shape (not a bool).
+    """
+    from app.collectors.apify import ActorAvailability
+
     asset = Mock(spec=Asset)
     asset.ticker = "0700.HK"
 
     mock_collector_instance = Mock()
-    mock_collector_instance.verify_actor.return_value = False
+    mock_collector_instance.verify_actor.return_value = ActorAvailability(
+        ref="lofomachines/telegram-keyword-search-scraper",
+        platform="lihkg",
+        available=False,
+        reason="actor not verified for this account (simulated)",
+    )
     mock_collector.return_value = mock_collector_instance
 
     pipeline = EndToEndPipeline(session_mock)

@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { PageContainer } from "../components/layout";
 import { StockList, StockDetail } from "../components/stocks";
+import { TickerReport } from "../components/reports";
 import { Button } from "../components/common/Button";
 import { ArrowLeft } from "lucide-react";
 
@@ -59,6 +60,7 @@ export function Stocks() {
             exit={{ opacity: 0, x: 20 }}
             transition={{ duration: 0.2 }}
           >
+            <TickerReport />
             <StockList onSelect={handleSelect} />
           </motion.div>
         )}

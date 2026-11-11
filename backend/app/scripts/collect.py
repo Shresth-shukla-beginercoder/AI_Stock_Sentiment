@@ -8,13 +8,20 @@ Subcommands
 -----------
 probe-market     Fetch + normalize prices, print a summary. NO persistence.
 probe-news       Run one news search, print a summary. NO persistence.
-verify-actors    Check each candidate Apify Actor exists / is accessible. NO run.
+verify-actors    Check each CONFIGURED Apify Actor (settings refs, per
+                 exchange) exists / is accessible, and report the actual
+                 input schema / example. NO run, no cost.
 collect-market   Fetch + persist prices for an *approved* asset (gated).
 collect-news     Search + persist news for an asset (gated on a real asset row).
-collect-social   Run + persist a verified Actor for an asset (gated).
+collect-social   Run + persist a verified, CONFIGURED Actor for an asset. The
+                 run input is built from the Actor's own schema/example
+                 (never guessed); the run is bounded + cost-capped.
 backfill-market  Enqueue historical market-price backfill jobs (enqueue-only).
                  The background worker does the actual fetch + persist. Use
                  --dry-run to preview the plan without touching the queue.
+backfill-predictions
+                   Fill NULL actual_close values on prediction rows from
+                   stored market-price bars (W6). Only NULLs are touched.
 
 The collect-* paths refuse to touch data for tickers that have no ``assets``
 row (or that are not confirmed), because the 10 proposed tickers are PENDING
@@ -56,6 +63,32 @@ def _days_back(n: int) -> tuple[date, date]:
 
 def _print(obj, **kw) -> None:
     print(json.dumps(obj, default=str, indent=2, **kw))
+
+
+def _db_persist_guard(subcommand: str) -> None:
+    """W7: persisting subcommands must never silently write to a remote DB.
+
+    The repo-root .env may set ``DATABASE_URL`` to the production (Neon)
+    instance; the script's ``load_dotenv`` puts it into the process env, and
+    settings resolve it with priority over the local dev parts. Guard: if the
+    resolved host is not a known local one, refuse unless the operator
+    explicitly opted in via ``COLLECT_ALLOW_NONLOCAL_DB=1``. The value of the
+    URL (credentials included) is never printed — only the host.
+    """
+    from urllib.parse import urlparse
+
+    settings = get_settings()
+    host = urlparse(settings.database_url_resolved()).hostname or "unknown"
+    local = host in {"localhost", "127.0.0.1", "postgres", "host.docker.internal"}
+    if not local and os.environ.get("COLLECT_ALLOW_NONLOCAL_DB") != "1":
+        raise SystemExit(
+            f"REFUSED: '{subcommand}' would persist to a NON-LOCAL database "
+            f"(host={host!r}). Local smoke runs must use the dev DB. "
+            f"To target the resolved remote DB deliberately, set "
+            f"COLLECT_ALLOW_NONLOCAL_DB=1 in the process environment."
+        )
+    print(f"DB: '{subcommand}' will persist to host={host!r} "
+          f"({'local' if local else 'NON-LOCAL — operator override active'})")
 
 
 # ------------------------------------------------------------------ probes
@@ -123,27 +156,57 @@ def probe_news(args) -> int:
 
 
 def verify_actors(args) -> int:
-    from app.collectors.apify import ApifySocialCollector, CANDIDATE_ACTORS
+    """W1: verify the CONFIGURED Actor refs for an exchange (settings-driven).
+
+    Read-only and cost-free: no Actor run, no social data. Reports the actual
+    input schema / example the Actor exposes so inputs are built from the
+    Actor's own contract, never guessed. Unconfigured platforms are recorded
+    honestly — no Actor id is invented.
+    """
+    from app.collectors.apify import (
+        ApifySocialCollector,
+        build_run_input,
+        configured_actors,
+    )
     from app.collectors.exceptions import ProviderError
 
     settings = get_settings()
     coll = ApifySocialCollector(settings=settings)
-    for cand in CANDIDATE_ACTORS:
-        try:
-            avail = coll.verify_actor(cand.ref, platform=cand.platform)
-            _print({
-                "actor": cand.ref,
-                "platform": cand.platform,
-                "available": avail.available,
-                "reason": avail.reason,
-                "is_public": avail.is_public,
-                "is_deprecated": avail.is_deprecated,
-                "has_input_schema": avail.input_schema is not None,
-                "notes": cand.notes,
-            })
-        except ProviderError as e:
-            _print({"actor": cand.ref, "platform": cand.platform,
-                    "available": False, "reason": f"{e.category}: {e.message}"})
+    exchanges = ["HKEX", "KRX"] if args.exchange == "ALL" else [args.exchange]
+    any_configured = False
+    for ex in exchanges:
+        for platform, ref in configured_actors(settings, ex):
+            record = {"exchange": ex, "platform": platform, "actor": ref or None,
+                     "configured": bool(ref)}
+            if not ref:
+                record["available"] = False
+                record["reason"] = ("not configured — set the matching settings field "
+                                    "(apify_actor_<platform>) to an owner-chosen ref")
+                _print(record)
+                continue
+            any_configured = True
+            try:
+                avail = coll.verify_actor(ref, platform=platform)
+                record["available"] = avail.available
+                record["reason"] = avail.reason
+                record["is_public"] = avail.is_public
+                record["is_deprecated"] = avail.is_deprecated
+                record["has_input_schema"] = avail.input_schema is not None
+                record["has_example_input"] = isinstance(avail.example_input, dict)
+                record["example_input"] = avail.example_input
+                if avail.available and args.ticker:
+                    inp, note = build_run_input(avail, args.ticker)
+                    record["run_input_constructible"] = inp is not None
+                    record["input_note"] = note
+                    if args.dump_schema and avail.input_schema is not None:
+                        record["input_schema"] = avail.input_schema
+            except ProviderError as e:
+                record["available"] = False
+                record["reason"] = f"{e.category}: {e.message}"
+            _print(record)
+    if not any_configured:
+        print("NOTE: no configured Actor refs for the requested exchange(s) — "
+              "nothing was verified and nothing was run.")
     print("NOTE: verification only — no Actor was run, no social data collected.")
     return 0
 
@@ -171,6 +234,7 @@ def _require_asset(ticker: str, exchange: str | None, settings):
 
 def collect_market(args) -> int:
     settings = get_settings()
+    _db_persist_guard("collect-market")
     asset, asset_id = _require_asset(args.ticker, args.exchange, settings)
     if asset is None:
         return 2
@@ -199,6 +263,7 @@ def collect_market(args) -> int:
 
 def collect_news(args) -> int:
     settings = get_settings()
+    _db_persist_guard("collect-news")
     asset, asset_id = _require_asset(args.ticker, args.exchange, settings)
     if asset is None:
         return 2
@@ -226,28 +291,70 @@ def collect_news(args) -> int:
 
 
 def collect_social(args) -> int:
+    """W1: run + persist a CONFIGURED, verified Actor for an asset (gated).
+
+    The Actor ref comes from settings (per exchange), never from the
+    hard-coded candidate list. The run input is built from the Actor's own
+    input schema / example (``build_run_input``) — never guessed — and the run
+    is bounded by item + charge caps (settings defaults, overridable via flags
+    for a controlled smoke run). Unconfigured platforms are refused honestly.
+    """
     settings = get_settings()
+    _db_persist_guard("collect-social")
     asset, asset_id = _require_asset(args.ticker, args.exchange, settings)
     if asset is None:
         return 2
-    from app.collectors.apify import ApifySocialCollector, CANDIDATE_ACTORS
+    from app.collectors.apify import (
+        ApifySocialCollector,
+        build_run_input,
+        configured_actors,
+    )
     from app.collectors.exceptions import ProviderError
     from app.services.persist import persist_social
     from app.database.session import get_session_factory
 
+    exchange = args.exchange or asset.exchange
+    platform_map = dict(configured_actors(settings, exchange))
+    if args.platform in platform_map and platform_map[args.platform]:
+        ref = args.actor or platform_map[args.platform]
+        platform = args.platform
+    elif args.platform == "auto":
+        for p, r in configured_actors(settings, exchange):
+            if r:
+                ref, platform = (args.actor or r), p
+                break
+        else:
+            ref, platform = None, None
+    else:
+        # Explicit platform but not configured for this exchange.
+        ref, platform = (args.actor or platform_map.get(args.platform) or None), args.platform
+
+    if not ref:
+        print(f"REFUSED: no configured Actor ref for platform {platform!r} on exchange "
+              f"{exchange!r}. Set apify_actor_{platform} in settings/.env — "
+              f"no Actor id will be invented.")
+        return 2
+
     coll = ApifySocialCollector(settings=settings)
-    ref = args.actor or next(c.ref for c in CANDIDATE_ACTORS if c.platform == args.platform)
-    avail = coll.verify_actor(ref, platform=args.platform)
+    avail = coll.verify_actor(ref, platform=platform)
     if not avail.available:
         print(f"REFUSED: Actor {ref!r} not usable ({avail.reason}). No run, no replacement.")
         return 2
-    # Build a minimal candidate input; validation against the ACTUAL schema is
-    # the gate — if the schema does not accept it, the run is not performed.
-    run_input = {"keyword": args.ticker, "searchString": args.ticker}
+    run_input, input_note = build_run_input(avail, args.ticker)
+    if run_input is None:
+        print(f"REFUSED: {input_note}. Run not performed — inputs are never guessed.")
+        return 2
+
+    # Bounded, cost-capped run. Defaults from settings; smoke flags can tighten.
+    max_items = args.max_items if args.max_items is not None else settings.apify_run_max_items
+    max_charge = args.max_charge if args.max_charge is not None else settings.apify_run_max_charge_usd
+    wait_s = settings.apify_run_wait_seconds
     try:
-        run = coll.run_actor(ref, run_input)
-        raw = coll.fetch_items(run)
-        items = coll.to_social_items(raw, platform=args.platform)
+        from datetime import timedelta as _td
+        run = coll.run_actor(ref, run_input, wait=_td(seconds=wait_s),
+                             max_items=max_items, max_total_charge_usd=max_charge)
+        raw = coll.fetch_items(run, limit=max_items)
+        items = coll.to_social_items(raw, platform=platform)
     except ProviderError as e:
         print(f"RESULT: provider_error category={e.category} message={e.message!r}")
         return 0
@@ -256,6 +363,8 @@ def collect_social(args) -> int:
         res = persist_social(session, asset_id, items)
         session.commit()
         _print({"result": "persisted", "provider": res.provider,
+                "actor": ref, "platform": platform,
+                "input_note": input_note,
                 "inserted": res.inserted, "skipped_duplicates": res.skipped_duplicates,
                 "null_published_at": res.null_published_at})
     return 0
@@ -328,6 +437,7 @@ def backfill_market(args) -> int:
             print("NOTE: dry-run — no jobs enqueued, nothing persisted, no worker triggered.")
             return 0
 
+        _db_persist_guard("backfill-market")
         if not jobs:
             print("NOTE: no confirmed+active assets matched; nothing enqueued.")
             return 0
@@ -364,6 +474,36 @@ def backfill_market(args) -> int:
         return 0
 
 
+def backfill_predictions(args) -> int:
+    """W6: fill NULL prediction actual_close values from stored price bars.
+
+    Idempotent and honest: only ``actual_close IS NULL`` rows whose target
+    session has already traded are updated (from the asset's configured
+    provider when present, else the newest stored bar). Due sessions with no
+    stored close stay NULL — never guessed. This writes to the configured
+    database, so run it deliberately.
+    """
+    from app.database.session import get_session_factory
+    from app.services.predict_backfill import backfill_actual_closes
+
+    _db_persist_guard("backfill-predictions")
+    factory = get_session_factory()
+    with factory() as session:
+        res = backfill_actual_closes(session, model_version=args.model_version)
+        session.commit()
+    _print({
+        "result": "backfill-predictions",
+        "model_version": args.model_version or "(all)",
+        "considered": res.considered,
+        "updated": res.updated,
+        "no_price_yet": res.no_price_yet,
+        "future": res.future,
+    })
+    print("NOTE: only NULL actual_close rows were touched; due sessions without a "
+          "stored close stay NULL (never guessed).")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     setup_logging()
     p = argparse.ArgumentParser(description="Phase 5 collection runner")
@@ -381,7 +521,15 @@ def main(argv: list[str] | None = None) -> int:
     pn.add_argument("--domains", default=None, help="comma-separated include_domains")
     pn.set_defaults(func=probe_news)
 
-    va = sub.add_parser("verify-actors")
+    va = sub.add_parser(
+        "verify-actors",
+        help="verify the CONFIGURED Actor refs for an exchange (read-only, no cost)",
+    )
+    va.add_argument("--exchange", default="ALL", choices=["HKEX", "KRX", "ALL"])
+    va.add_argument("--ticker", default=None,
+                    help="report run-input constructibility for this ticker")
+    va.add_argument("--dump-schema", action="store_true",
+                    help="include the observed input schema in the output")
     va.set_defaults(func=verify_actors)
 
     cm = sub.add_parser("collect-market")
@@ -397,10 +545,15 @@ def main(argv: list[str] | None = None) -> int:
 
     cs = sub.add_parser("collect-social")
     cs.add_argument("--ticker", required=True)
-    cs.add_argument("--platform", default="telegram",
-                    choices=["telegram", "lihkg", "unknown"])
+    cs.add_argument("--platform", default="auto",
+                    choices=["auto", "telegram", "lihkg", "kakao", "naver"],
+                    help="'auto' = first configured platform for the exchange")
     cs.add_argument("--actor", default=None, help="explicit Actor ref override")
     cs.add_argument("--exchange", default=None)
+    cs.add_argument("--max-items", type=int, default=None,
+                   help="dataset items read (default: settings.apify_run_max_items)")
+    cs.add_argument("--max-charge", type=float, default=None,
+                   help="per-run USD charge cap (default: settings.apify_run_max_charge_usd)")
     cs.set_defaults(func=collect_social)
 
     bf = sub.add_parser(
@@ -417,6 +570,15 @@ def main(argv: list[str] | None = None) -> int:
     bf.add_argument("--dry-run", action="store_true",
                     help="print the planned jobs; enqueue nothing, persist nothing")
     bf.set_defaults(func=backfill_market)
+
+    bpr = sub.add_parser(
+        "backfill-predictions",
+        help="fill NULL prediction actual_close values from stored price bars "
+             "(W6; writes to the configured DB)",
+    )
+    bpr.add_argument("--model-version", default=None,
+                     help="restrict to one model version (default: all)")
+    bpr.set_defaults(func=backfill_predictions)
 
     args = p.parse_args(argv)
     return args.func(args)
