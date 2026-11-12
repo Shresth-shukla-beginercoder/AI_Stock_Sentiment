@@ -34,17 +34,21 @@ def test_credentials_helpers_treat_apify_honestly():
 
 def test_actor_refs_come_from_settings_not_hardcoded_candidates():
     defaults = Settings(_env_file=None)
+    # HKEX social platforms: telegram + hkgolden, both canonical IDs by default.
     assert configured_actors(defaults, "HKEX") == [
-        ("lihkg", "claude_code_reviewer/lihkg-scraper-en"),
-        ("telegram", "lofomachines/telegram-keyword-search-scraper"),
+        ("telegram", "kCdMrRb7UiSRSFYeO"),
+        ("hkgolden", "fSZMN7Wfwuye4J8cd"),
     ]
-    # KRX platforms are unconfigured by default -> empty refs, honestly.
-    assert configured_actors(defaults, "KRX") == [("kakao", ""), ("naver", "")]
+    # KRX social platforms: telegram + naver (Daum is a NEWS source, not here).
+    assert configured_actors(defaults, "KRX") == [
+        ("telegram", "kCdMrRb7UiSRSFYeO"),
+        ("naver", "xxFbG2oX6UpaPtcTC"),
+    ]
     # Owner-supplied refs flow through settings (config -> code wiring, W7).
-    custom = Settings(_env_file=None, apify_actor_kakao="ns/kakao-actor",
-                      apify_actor_naver="ns2/naver-actor")
+    custom = Settings(_env_file=None, apify_actor_telegram="ns/tg-actor",
+                     apify_actor_naver="ns2/naver-actor")
     assert configured_actors(custom, "krx") == [
-        ("kakao", "ns/kakao-actor"),
+        ("telegram", "ns/tg-actor"),
         ("naver", "ns2/naver-actor"),
     ]
 
@@ -106,9 +110,10 @@ def test_unconfigured_platforms_are_recorded_not_run():
         def verify_actor(self, ref, platform=None):
             raise AssertionError("unconfigured actors must not be verified")
 
-    s = Settings(_env_file=None)  # KRX refs default to ""
-    recs = resolve_exchange_actors(s, "KRX", _NoVerify(), "005930")
-    assert [r["platform"] for r in recs] == ["kakao", "naver"]
+    # Empty refs -> honestly recorded as not configured (never verified/run).
+    s = Settings(_env_file=None, apify_actor_telegram="", apify_actor_hkgolden="")
+    recs = resolve_exchange_actors(s, "HKEX", _NoVerify(), "0700")
+    assert [r["platform"] for r in recs] == ["telegram", "hkgolden"]
     for r in recs:
         assert r["configured"] is False
         assert r["available"] is False

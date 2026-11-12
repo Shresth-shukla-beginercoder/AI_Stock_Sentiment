@@ -115,10 +115,13 @@ def test_select_model_chinese_unsupported(mock_detect):
 
 
 @patch("app.sentiment.language.detect_language")
-def test_select_model_korean_unsupported(mock_detect):
+def test_select_model_korean_falls_back_to_english_model(mock_detect):
     mock_detect.return_value = "ko"
+    # No verified Korean financial-sentiment model yet: Korean content is
+    # routed to the English Twitter model as a documented suboptimal fallback
+    # (never returns None so Naver/Daum posts still score).
     model = select_model("안녕", "news")
-    assert model is None  # Unsupported
+    assert model == "cardiffnlp/twitter-roberta-base-sentiment-latest"
 
 
 @patch("app.sentiment.language.detect_language")

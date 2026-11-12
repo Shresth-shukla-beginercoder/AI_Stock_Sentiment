@@ -293,10 +293,12 @@ class ApifySocialCollector:
 
 #: Per-exchange platform -> Settings field holding the owner-supplied Actor ref.
 #: An empty ref means "not configured" for that exchange: the worker records it
-#: honestly and never invents an Actor id.
+#: honestly and never invents an Actor id. Refs are the canonical unique Actor
+#: IDs (required for POST /runs). Daum is a NEWS source, handled in
+#: handle_collect_news, not in the social path.
 EXCHANGE_ACTOR_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
-    "HKEX": (("lihkg", "apify_actor_lihkg"), ("telegram", "apify_actor_telegram")),
-    "KRX": (("kakao", "apify_actor_kakao"), ("naver", "apify_actor_naver")),
+    "HKEX": (("telegram", "apify_actor_telegram"), ("hkgolden", "apify_actor_hkgolden")),
+    "KRX": (("telegram", "apify_actor_telegram"), ("naver", "apify_actor_naver")),
 }
 
 #: String schema/example keys whose value is a *searchable ticker/keyword*.

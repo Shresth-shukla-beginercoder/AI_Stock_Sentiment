@@ -115,8 +115,14 @@ def select_model(text: str, source_type: str) -> Optional[str]:
         _log.debug("using twitter model for english news (suboptimal but verified)")
         return VERIFIED_MODELS["en-social"].model_id
 
-    # Chinese/Japanese/Korean: UNVERIFIED
-    if lang in ("zh", "ja", "ko"):
+    # Chinese/Japanese/Korean: Temporary fallback to English model for Korean data
+    # TODO: Replace with a verified Korean sentiment model
+    if lang == "ko":
+        _log.info("Korean content using English model (suboptimal fallback)",
+                  extra={"source_type": source_type})
+        return VERIFIED_MODELS["en-social"].model_id
+
+    if lang in ("zh", "ja"):
         _log.info("unsupported language (no verified CJK sentiment model)",
                   extra={"lang": lang, "source_type": source_type})
         return None

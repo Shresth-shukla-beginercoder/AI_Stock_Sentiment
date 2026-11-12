@@ -187,6 +187,16 @@ def handle_collect_social(session: Session, job: CollectionJob) -> Dict[str, Any
                                      run_wait_seconds=settings.apify_run_wait_seconds)
     records = resolve_exchange_actors(settings, exchange, collector, ticker)
 
+    # Platform-specific output mappers (each Actor has its own field layout).
+    def _items_for(platform: str, raw: list[dict]) -> list:
+        if platform == "naver":
+            from app.collectors.naver_discussion import NaverDiscussionCollector
+            return NaverDiscussionCollector().to_social_items(raw, platform="naver")
+        if platform == "hkgolden":
+            from app.collectors.hkgolden import HKGoldenCollector
+            return HKGoldenCollector().to_social_items(raw, platform="hkgolden")
+        return collector.to_social_items(raw, platform=platform)
+
     fetched = 0
     inserted = 0
     skipped = 0
@@ -222,7 +232,7 @@ def handle_collect_social(session: Session, job: CollectionJob) -> Dict[str, Any
                                 "error": str(e)[:200]})
             continue
         raw = collector.fetch_items(run)
-        items = collector.to_social_items(raw, platform=rec["platform"])
+        items = _items_for(rec["platform"], raw)
         rec["fetched"] = len(raw)
         rec["mapped"] = len(items)
         if items:
@@ -257,9 +267,15 @@ def handle_collect_social(session: Session, job: CollectionJob) -> Dict[str, Any
 
 
 def handle_collect_news(session: Session, job: CollectionJob) -> Dict[str, Any]:
-    """Handle collect:news job - fetch news articles via Exa."""
+    """Handle collect:news job - fetch news articles via Exa (all) and Daum (KRX).
+
+    Per-source collection is isolated: a failure in one source does not prevent
+    collection from the other. All items are deduplicated and persisted together.
+    """
     from app.collectors.exa import ExaNewsCollector
+    from app.collectors.daum_news import DaumNewsCollector
     from app.services.persist import resolve_asset, persist_news
+    from app.collectors.exceptions import TransientError
 
     settings = get_settings()
     params = job.params or {}
@@ -268,20 +284,63 @@ def handle_collect_news(session: Session, job: CollectionJob) -> Dict[str, Any]:
         raise ValueError("collect:news requires params['ticker']")
     ticker_name = params.get("ticker_name") or ticker
     target_date = date.fromisoformat(params["target_date"])
+    exchange = params.get("exchange")
 
-    _log.info("collecting news articles", extra={"ticker": ticker, "date": target_date.isoformat()})
+    _log.info("collecting news articles", extra={"ticker": ticker, "date": target_date.isoformat(), "exchange": exchange})
 
-    collector = ExaNewsCollector(settings=settings)
-    query = f"{ticker_name} {ticker} news"
-    items = collector.search(query, end=target_date)
+    all_items = []
+    sources_result = {}
 
-    asset = resolve_asset(session, ticker, params.get("exchange"))
+    # Collect from Exa (News) — all exchanges
+    try:
+        exa_collector = ExaNewsCollector(settings=settings)
+        query = f"{ticker_name} {ticker} news"
+        exa_items = exa_collector.search(query, end=target_date)
+        all_items.extend(exa_items)
+        sources_result["exa"] = {
+            "fetched": len(exa_items),
+            "status": "success"
+        }
+        _log.info("exa news fetch complete", extra={"count": len(exa_items)})
+    except Exception as e:
+        sources_result["exa"] = {
+            "fetched": 0,
+            "status": "failed",
+            "error": str(e)[:200]
+        }
+        _log.warning("exa news fetch failed", extra={"error": str(e)[:200]})
+
+    # Collect from Daum (if KRX)
+    if exchange == "KRX":
+        try:
+            daum_collector = DaumNewsCollector()
+            daum_items_raw = daum_collector.fetch(
+                sections=["economy", "stock", "finance", "industry"],
+                max_items=20
+            )
+            daum_items = daum_collector.to_news_items(daum_items_raw)
+            all_items.extend(daum_items)
+            sources_result["daum"] = {
+                "fetched": len(daum_items_raw),
+                "mapped": len(daum_items),
+                "status": "success"
+            }
+            _log.info("daum news fetch complete", extra={"count": len(daum_items)})
+        except Exception as e:
+            sources_result["daum"] = {
+                "fetched": 0,
+                "status": "failed",
+                "error": str(e)[:200]
+            }
+            _log.warning("daum news fetch failed", extra={"error": str(e)[:200]})
+
+    asset = resolve_asset(session, ticker, exchange)
     if asset is None:
         _log.warning("collect:news: asset not resolved; skipping persistence",
                      extra={"ticker": ticker})
         return {
-            "provider": "exa",
-            "fetched": len(items),
+            "sources": sources_result,
+            "total_fetched": len(all_items),
             "inserted": 0,
             "skipped_duplicates": 0,
             "asset_resolved": False,
@@ -292,7 +351,7 @@ def handle_collect_news(session: Session, job: CollectionJob) -> Dict[str, Any]:
     # every item that is kept.
     from app.collectors.relevance import filter_asset_relevant
     kept, rel = filter_asset_relevant(
-        items,
+        all_items,
         name=asset.name,
         ticker=ticker,
         provider_ticker=asset.provider_ticker,
@@ -302,8 +361,8 @@ def handle_collect_news(session: Session, job: CollectionJob) -> Dict[str, Any]:
     session.commit()
 
     return {
-        "provider": "exa",
-        "fetched": len(items),
+        "sources": sources_result,
+        "total_fetched": len(all_items),
         "relevance": {
             "relevant": rel.relevant,
             "ambiguous_kept": rel.ambiguous,

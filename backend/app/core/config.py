@@ -62,14 +62,17 @@ class Settings(BaseSettings):
     # provider="yfinance" (per-row attribution). "" disables the fallback.
     market_data_fallback: str = "yfinance"
 
-    # Apify actor refs per social platform (owner-supplied; UNVERIFIED until a
-    # real verify/run). Empty ref = not configured: the collector records that
-    # honestly and never invents an Actor id. The two HK defaults are the
-    # Phase 5 candidates.
-    apify_actor_lihkg: str = "claude_code_reviewer/lihkg-scraper-en"
-    apify_actor_telegram: str = "lofomachines/telegram-keyword-search-scraper"
-    apify_actor_kakao: str = ""
-    apify_actor_naver: str = ""
+    # Apify actor refs per source. POST /runs MUST use the canonical unique
+    # Actor ID (tilde "namespace/name" refs 404 on run POST, though they work
+    # for GET metadata). Canonical IDs verified live (2026-11):
+    #   telegram  = kCdMrRb7UiSRSFYeO  (lofomachines~telegram-keyword-search-scraper)
+    #   naver     = xxFbG2oX6UpaPtcTC  (hgservices~naver-stock-discussion-scraper)
+    #   daum      = Nb4IPtZTzc2RtuH7S  (ardent_fork~daum-news)
+    #   hkgolden  = fSZMN7Wfwuye4J8cd  (claude_code_reviewer~hkgolden-scraper)
+    apify_actor_telegram: str = "kCdMrRb7UiSRSFYeO"
+    apify_actor_naver: str = "xxFbG2oX6UpaPtcTC"
+    apify_actor_daum: str = "Nb4IPtZTzc2RtuH7S"
+    apify_actor_hkgolden: str = "fSZMN7Wfwuye4J8cd"
 
     # W1: bounded, cost-capped Actor execution. A collect:social job runs an
     # actor only when it was verified for this exchange's configured refs and
