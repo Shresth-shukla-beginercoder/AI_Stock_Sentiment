@@ -34,3 +34,7 @@ CLAUDE.md
 
 # Internal project progress and verification
 docs/
+
+# CEO-facing repo: hide every markdown doc, keep only the root README.md
+*.md
+!/README.md
