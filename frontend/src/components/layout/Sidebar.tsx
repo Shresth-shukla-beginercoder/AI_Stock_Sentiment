@@ -46,7 +46,7 @@ export function Sidebar() {
           transition={{ duration: 0.15 }}
           className="font-display font-bold tracking-tight text-text-primary whitespace-nowrap"
         >
-          NEXTBELL
+          HENGSENG
         </motion.span>
       </div>
 

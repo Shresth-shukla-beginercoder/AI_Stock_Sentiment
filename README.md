@@ -2,7 +2,7 @@
 
 # 📈 AI Stock Sentiment & Next-Day Prediction Agent
 
-> **NEXTBELL** — a research platform that collects social posts + news for 10 major
+> **HENGSENG** — a research platform that collects social posts + news for 10 major
 > HKEX & KRX stocks, scores NLP sentiment, tracks price history, and serves
 > **experimental** next-day-return predictions through a typed REST API + dashboard.
 

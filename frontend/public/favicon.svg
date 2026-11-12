@@ -1,5 +1,5 @@
 <svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Background circle with NEXTBELL gradient -->
+  <!-- Background circle with HENGSENG gradient -->
   <defs>
     <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#1e293b"/>
@@ -32,6 +32,6 @@
   <circle cx="20" cy="18" r="1.5" fill="#f59e0b" opacity="0.6"/>
   <circle cx="26" cy="19" r="1.5" fill="#f59e0b" opacity="0.4"/>
 
-  <!-- NextBell text mark -->
-  <text x="24" y="41" text-anchor="middle" font-family="Inter, sans-serif" font-size="6" font-weight="700" fill="#94a3b8" letter-spacing="2">NEXT</text>
+  <!-- Hengseng text mark -->
+  <text x="24" y="41" text-anchor="middle" font-family="Inter, sans-serif" font-size="6" font-weight="700" fill="#94a3b8" letter-spacing="2">HS</text>
 </svg>

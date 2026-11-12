@@ -1,5 +1,5 @@
 
-/* NEXTBELL Typography - @font-face declarations */
+/* HENGSENG Typography - @font-face declarations */
 @font-face {
   font-family: "Big Shoulders Display";
   font-style: normal;
@@ -70,7 +70,7 @@
 
 :root {
   color-scheme: dark;
-  /* NEXTBELL Design Tokens */
+  /* HENGSENG Design Tokens */
   --ink: #0a0f1c;
   --navy: #111827;
   --chrome: #1e293b;
@@ -113,7 +113,7 @@ body {
   background-attachment: fixed;
 }
 
-/* NEXTBELL display font utility */
+/* HENGSENG display font utility */
 .font-display {
   font-family: "Big Shoulders Display", system-ui, sans-serif;
   letter-spacing: -0.02em;

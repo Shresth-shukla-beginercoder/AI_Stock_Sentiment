@@ -131,7 +131,7 @@ export function EntryLoader({ onComplete }: EntryLoaderProps) {
               backgroundSize: "200% 100%",
             }}
           >
-            NEXTBELL
+            HENGSENG
           </motion.h1>
           <motion.div
             initial={{ width: 0 }}
@@ -211,7 +211,7 @@ export function EntryLoader({ onComplete }: EntryLoaderProps) {
               />
               <img
                 src="/favicon.png"
-                alt="NEXTBELL"
+                alt="HENGSENG"
                 className="relative h-16 w-16 rounded-lg"
               />
             </div>
@@ -357,7 +357,7 @@ export function EntryLoader({ onComplete }: EntryLoaderProps) {
 
       {/* Corner decorations */}
       <div className="absolute top-4 left-4 font-mono text-[10px] text-muted/40 tracking-wider">
-        NEXTBELL v1.0.0
+        HENGSENG v1.0.0
       </div>
       <div className="absolute top-4 right-4 font-mono text-[10px] text-muted/40 tracking-wider">
         {new Date().toISOString().split('T')[0]}

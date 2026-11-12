@@ -45,7 +45,7 @@ export function Navbar() {
             <div className="relative">
               <img
                 src="/favicon.png"
-                alt="NEXTBELL"
+                alt="HENGSENG"
                 className="h-9 w-9 rounded-lg shadow-lg"
               />
               <motion.div
@@ -61,7 +61,7 @@ export function Navbar() {
             </div>
             <div className="flex flex-col">
               <span className="font-display font-bold tracking-tight text-text-primary text-lg">
-                NEXTBELL
+                HENGSENG
               </span>
               <span className="text-[9px] text-muted uppercase tracking-wider">Terminal</span>
             </div>

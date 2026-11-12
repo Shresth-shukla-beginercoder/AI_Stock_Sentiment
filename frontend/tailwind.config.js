@@ -5,7 +5,7 @@ export default {
   theme: {
     extend: {
       colors: {
-        // NEXTBELL Design Tokens
+        // HENGSENG Design Tokens
         ink: "#0a0f1c",
         navy: "#111827",
         chrome: {
