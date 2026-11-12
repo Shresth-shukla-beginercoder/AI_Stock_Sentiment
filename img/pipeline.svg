@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="470" viewBox="0 0 860 470" role="img" aria-label="Data pipeline workflow diagram">
+  <defs>
+    <linearGradient id="p" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#14243f"/>
+      <stop offset="1" stop-color="#0e1a30"/>
+    </linearGradient>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5b7ba6"/>
+    </marker>
+  </defs>
+
+  <rect width="860" height="470" fill="#0b1220"/>
+  <text x="430" y="30" fill="#e6edf7" font-family="Segoe UI, Arial, sans-serif" font-size="16" text-anchor="middle" font-weight="700">Collection → Scoring → Prediction → Serve</text>
+
+  <!-- Row 1: ingest -->
+  <g font-family="Segoe UI, Arial, sans-serif" font-size="13" text-anchor="middle">
+    <rect x="40" y="58" width="150" height="70" rx="10" fill="url(#p)" stroke="#f5b841" stroke-width="1.5"/>
+    <text x="115" y="88" fill="#f5b841" font-weight="700">Market</text>
+    <text x="115" y="108" fill="#8fa0bd">Twelve Data</text>
+    <rect x="230" y="58" width="150" height="70" rx="10" fill="url(#p)" stroke="#f5b841" stroke-width="1.5"/>
+    <text x="305" y="88" fill="#f5b841" font-weight="700">News</text>
+    <text x="305" y="108" fill="#8fa0bd">Exa / Tavily</text>
+    <rect x="420" y="58" width="150" height="70" rx="10" fill="url(#p)" stroke="#f5b841" stroke-width="1.5"/>
+    <text x="495" y="88" fill="#f5b841" font-weight="700">Social</text>
+    <text x="495" y="108" fill="#8fa0bd">Apify actors</text>
+    <rect x="610" y="58" width="150" height="70" rx="10" fill="url(#p)" stroke="#f5b841" stroke-width="1.5"/>
+    <text x="685" y="88" fill="#f5b841" font-weight="700">Scheduler</text>
+    <text x="685" y="108" fill="#8fa0bd">daily + advisory lock</text>
+  </g>
+
+  <!-- arrows down to normalize -->
+  <line x1="115" y1="128" x2="430" y2="150" stroke="#5b7ba6" stroke-width="1.5"/>
+  <line x1="305" y1="128" x2="430" y2="150" stroke="#5b7ba6" stroke-width="1.5"/>
+  <line x1="495" y1="128" x2="430" y2="150" stroke="#5b7ba6" stroke-width="1.5"/>
+  <line x1="685" y1="128" x2="430" y2="150" stroke="#5b7ba6" stroke-width="1.5" marker-end="url(#a2)"/>
+
+  <!-- Row 2: normalize + dedupe -->
+  <rect x="300" y="152" width="260" height="56" rx="10" fill="url(#p)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="430" y="176" fill="#34d399" font-family="Segoe UI, Arial, sans-serif" font-size="14" text-anchor="middle" font-weight="700">Normalise + dedupe</text>
+  <text x="430" y="196" fill="#8fa0bd" font-family="Segoe UI, Arial, sans-serif" font-size="12" text-anchor="middle">SHA-256 · ON CONFLICT DO NOTHING</text>
+  <line x1="430" y1="208" x2="430" y2="234" stroke="#5b7ba6" stroke-width="2" marker-end="url(#a2)"/>
+
+  <!-- Row 3: sentiment -->
+  <rect x="300" y="236" width="260" height="56" rx="10" fill="url(#p)" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="430" y="260" fill="#4d9fff" font-family="Segoe UI, Arial, sans-serif" font-size="14" text-anchor="middle" font-weight="700">Sentiment scoring</text>
+  <text x="430" y="280" fill="#8fa0bd" font-family="Segoe UI, Arial, sans-serif" font-size="12" text-anchor="middle">P(pos)−P(neg) · engagement weight · 10-day window</text>
+  <line x1="430" y1="292" x2="430" y2="318" stroke="#5b7ba6" stroke-width="2" marker-end="url(#a2)"/>
+
+  <!-- Row 4: prediction -->
+  <rect x="300" y="320" width="260" height="56" rx="10" fill="url(#p)" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="430" y="344" fill="#4d9fff" font-family="Segoe UI, Arial, sans-serif" font-size="14" text-anchor="middle" font-weight="700">Next-day return model</text>
+  <text x="430" y="364" fill="#8fa0bd" font-family="Segoe UI, Arial, sans-serif" font-size="12" text-anchor="middle">walk-forward · MAE/RMSE/directional · registry</text>
+  <line x1="430" y1="376" x2="430" y2="402" stroke="#5b7ba6" stroke-width="2" marker-end="url(#a2)"/>
+
+  <!-- Row 5: serve -->
+  <rect x="300" y="404" width="260" height="48" rx="10" fill="url(#p)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="430" y="432" fill="#34d399" font-family="Segoe UI, Arial, sans-serif" font-size="14" text-anchor="middle" font-weight="700">REST API + Dashboard</text>
+
+  <!-- side note: job queue -->
+  <rect x="560" y="236" width="250" height="140" rx="12" fill="#0f1c33" stroke="#5b7ba6" stroke-dasharray="6 4"/>
+  <text x="685" y="262" fill="#cdd9ee" font-family="Segoe UI, Arial, sans-serif" font-size="13" text-anchor="middle" font-weight="700">Persistent job queue</text>
+  <g font-family="Consolas, monospace" font-size="11" fill="#8fa0bd" text-anchor="middle">
+    <text x="685" y="288">collect:social · collect:news</text>
+    <text x="685" y="306">score:sentiment · train</text>
+    <text x="685" y="324">FOR UPDATE SKIP LOCKED</text>
+    <text x="685" y="342">backoff 1/2/4/8 min</text>
+    <text x="685" y="360">reaper &gt; 30 min</text>
+  </g>
+  <line x1="560" y1="300" x2="560" y2="300" stroke="none"/>
+
+  <!-- side note: workers -->
+  <rect x="50" y="236" width="200" height="140" rx="12" fill="#0f1c33" stroke="#5b7ba6" stroke-dasharray="6 4"/>
+  <text x="150" y="262" fill="#cdd9ee" font-family="Segoe UI, Arial, sans-serif" font-size="13" text-anchor="middle" font-weight="700">Scale-out</text>
+  <g font-family="Consolas, monospace" font-size="11" fill="#8fa0bd" text-anchor="middle">
+    <text x="150" y="288">worker=1 (default)</text>
+    <text x="150" y="306">worker=N (prod)</text>
+    <text x="150" y="324">advisory-lock scheduler</text>
+    <text x="150" y="342">--once batch mode</text>
+    <text x="150" y="360">SIGTERM graceful</text>
+  </g>
+</svg>

@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="520" viewBox="0 0 860 520" role="img" aria-label="System architecture diagram">
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#14243f"/>
+      <stop offset="1" stop-color="#0e1a30"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5b7ba6"/>
+    </marker>
+  </defs>
+
+  <rect width="860" height="520" fill="#0b1220"/>
+
+  <!-- Client -->
+  <rect x="330" y="16" width="200" height="46" rx="10" fill="url(#panel)" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="430" y="44" fill="#e6edf7" font-family="Segoe UI, Arial, sans-serif" font-size="15" text-anchor="middle" font-weight="600">Client / Browser</text>
+
+  <line x1="430" y1="62" x2="430" y2="96" stroke="#5b7ba6" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Proxy -->
+  <rect x="310" y="98" width="240" height="44" rx="10" fill="url(#panel)" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="430" y="125" fill="#e6edf7" font-family="Segoe UI, Arial, sans-serif" font-size="14" text-anchor="middle" font-weight="600">Reverse Proxy / TLS (nginx, Cloudflare)</text>
+
+  <line x1="380" y1="142" x2="250" y2="176" stroke="#5b7ba6" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="480" y1="142" x2="610" y2="176" stroke="#5b7ba6" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Frontend -->
+  <rect x="150" y="178" width="200" height="70" rx="10" fill="url(#panel)" stroke="#f5b841" stroke-width="1.5"/>
+  <text x="250" y="206" fill="#f5b841" font-family="Segoe UI, Arial, sans-serif" font-size="15" text-anchor="middle" font-weight="700">Frontend</text>
+  <text x="250" y="226" fill="#8fa0bd" font-family="Segoe UI, Arial, sans-serif" font-size="12" text-anchor="middle">React + Vite · Nginx :80</text>
+  <text x="250" y="242" fill="#8fa0bd" font-family="Segoe UI, Arial, sans-serif" font-size="12" text-anchor="middle">/api/ → backend proxy</text>
+
+  <!-- Backend -->
+  <rect x="510" y="178" width="200" height="70" rx="10" fill="url(#panel)" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="610" y="206" fill="#4d9fff" font-family="Segoe UI, Arial, sans-serif" font-size="15" text-anchor="middle" font-weight="700">Backend API</text>
+  <text x="610" y="226" fill="#8fa0bd" font-family="Segoe UI, Arial, sans-serif" font-size="12" text-anchor="middle">FastAPI · :8000</text>
+  <text x="610" y="242" fill="#8fa0bd" font-family="Segoe UI, Arial, sans-serif" font-size="12" text-anchor="middle">Alembic migrations</text>
+
+  <line x1="610" y1="248" x2="610" y2="292" stroke="#5b7ba6" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Row: Postgres / HF / Worker -->
+  <rect x="120" y="294" width="200" height="70" rx="10" fill="url(#panel)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="220" y="322" fill="#34d399" font-family="Segoe UI, Arial, sans-serif" font-size="15" text-anchor="middle" font-weight="700">PostgreSQL 17</text>
+  <text x="220" y="342" fill="#8fa0bd" font-family="Segoe UI, Arial, sans-serif" font-size="12" text-anchor="middle">8 tables · job queue</text>
+  <text x="220" y="358" fill="#8fa0bd" font-family="Segoe UI, Arial, sans-serif" font-size="12" text-anchor="middle">sha-256 dedupe</text>
+
+  <rect x="330" y="294" width="200" height="70" rx="10" fill="url(#panel)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="430" y="322" fill="#34d399" font-family="Segoe UI, Arial, sans-serif" font-size="15" text-anchor="middle" font-weight="700">Worker</text>
+  <text x="430" y="342" fill="#8fa0bd" font-family="Segoe UI, Arial, sans-serif" font-size="12" text-anchor="middle">SKIP LOCKED claim</text>
+  <text x="430" y="358" fill="#8fa0bd" font-family="Segoe UI, Arial, sans-serif" font-size="12" text-anchor="middle">reaper · scheduler</text>
+
+  <rect x="540" y="294" width="200" height="70" rx="10" fill="url(#panel)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="640" y="322" fill="#34d399" font-family="Segoe UI, Arial, sans-serif" font-size="15" text-anchor="middle" font-weight="700">HF Model Cache</text>
+  <text x="640" y="342" fill="#8fa0bd" font-family="Segoe UI, Arial, sans-serif" font-size="12" text-anchor="middle">/models volume</text>
+  <text x="640" y="358" fill="#8fa0bd" font-family="Segoe UI, Arial, sans-serif" font-size="12" text-anchor="middle">sentiment + ML</text>
+
+  <!-- External APIs -->
+  <line x1="250" y1="142" x2="250" y2="142" stroke="none"/>
+  <rect x="120" y="400" width="620" height="104" rx="12" fill="#0f1c33" stroke="#3b82f6" stroke-dasharray="6 4" stroke-width="1.5"/>
+  <text x="430" y="424" fill="#4d9fff" font-family="Segoe UI, Arial, sans-serif" font-size="14" text-anchor="middle" font-weight="700">External Data Providers</text>
+  <g font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#cdd9ee" text-anchor="middle">
+    <rect x="140" y="436" width="140" height="44" rx="8" fill="#16294a"/>
+    <text x="210" y="454" font-weight="600">Twelve Data</text>
+    <text x="210" y="470" fill="#8fa0bd">OHLCV + yfinance</text>
+    <rect x="290" y="436" width="140" height="44" rx="8" fill="#16294a"/>
+    <text x="360" y="454" font-weight="600">Exa / Tavily</text>
+    <text x="360" y="470" fill="#8fa0bd">news + web search</text>
+    <rect x="440" y="436" width="140" height="44" rx="8" fill="#16294a"/>
+    <text x="510" y="454" font-weight="600">Apify</text>
+    <text x="510" y="470" fill="#8fa0bd">social (X/Reddit/…)</text>
+  </g>
+
+  <!-- connectors to external -->
+  <line x1="640" y1="364" x2="640" y2="400" stroke="#5b7ba6" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="430" y1="364" x2="430" y2="400" stroke="#5b7ba6" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <text x="16" y="508" fill="#5b7ba6" font-family="Consolas, monospace" font-size="11">ai-stock · backend :8000 · frontend :3000 · postgres :5437 (dev)</text>
+</svg>
